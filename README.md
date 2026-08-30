@@ -281,9 +281,13 @@ configuration templates; they do not create host PF publications. The
 Kubernetes Pod status is updated with the allocated Pod IP, host IP, phase,
 conditions, and native container state. A terminating/deleted Pod stops and
 removes its Macker container and releases its address alias. The first runtime
-slice intentionally rejects multiple containers, non-service-account volume
-mounts, `valueFrom` environment entries, custom working directories, and
-`hostPort` mappings. Supply `--macker-binary` to `join` when Macker is not on
+slice supports writable `hostPath` volumes through Macker's live symlink-backed
+`-v` mounts. `Directory`, `DirectoryOrCreate`, `File`, and
+`FileOrCreate` hostPath types are supported, as is a contained `subPath`.
+Macker cannot enforce read-only mounts, so `readOnly` and `subPathExpr` mounts
+are rejected. Multiple containers, non-hostPath volume sources, `valueFrom`
+environment entries, custom working directories, and `hostPort` mappings are
+also rejected. Supply `--macker-binary` to `join` when Macker is not on
 `PATH`; image layouts must already be available in Macker's image store.
 
 ### Service and Ingress caveat
@@ -294,13 +298,12 @@ the Service to the maclet Pod IP through Flannel. cert-manager can also use the
 existing `letsencrypt` ClusterIssuer, which is configured for Traefik HTTP-01
 challenges.
 
-This is currently a single-peer network experiment, not a production ingress
-path. Traffic through Linux node `192.168.1.111` has been validated; traffic
-that enters through the other Linux nodes is not yet reliable because maclet's
-return path currently uses one selected Linux Flannel VTEP. For a first test,
-point `nginx.dev.initialed85.cc` at `192.168.1.111` (or otherwise ensure the
-request reaches that node) rather than all four ingress addresses. Multi-peer
-VTEP return routing is still future work.
+This remains an experimental trusted-native ingress path, but maclet now
+discovers all Linux Flannel peers and installs destination-specific PodCIDR
+routes and VTEP mappings. Traffic through all four Linux ingress nodes has been
+validated in the development cluster. `--vxlan-remote` remains the selected
+fallback for ServiceCIDR traffic; it should point at a healthy Linux Flannel
+node.
 
 The hostname must resolve to a reachable Traefik node for the HTTP-01
 certificate challenge. In the development environment, check this before
@@ -320,8 +323,8 @@ inspect it with `kubectl --context home-dev describe certificate` or
 
 ## VXLAN network handoff
 
-maclet can launch the existing `darwin-vxlan` process and complete the current
-single-peer Flannel setup after K3s assigns the Node's PodCIDR:
+maclet can launch the existing `darwin-vxlan` process and complete the
+multi-peer Flannel setup after K3s assigns the Node's PodCIDR:
 
 ```sh
 ./maclet join \
@@ -340,20 +343,23 @@ made from the allocated PodCIDR (for example `10.42.4.1/24`). maclet then:
   `public-ip`, and `kube-subnet-manager` annotations on its Node;
 - causes the existing Linux Flannel instances to install the Darwin PodCIDR
   route and permanent FDB entry automatically;
-- reads the selected remote Linux node's `flannel.1` MAC (the `VtepMAC`) from
-  the peer kubeconfig; use `--vxlan-gateway-mac` only as a static override;
-- installs a synthetic gateway (the second usable address in the Darwin
-  PodCIDR, for example `10.42.4.2`) and routes for the configured
+- reads every eligible Linux Flannel peer's PodCIDR, public underlay IP, and
+  `flannel.1` MAC from the peer kubeconfig; use `--vxlan-gateway-mac` only as a
+  static single-peer override;
+- installs one synthetic gateway and ARP entry per discovered peer, reserves
+  those addresses from workload allocation, and adds a route for each remote
+  PodCIDR; the selected `--vxlan-remote` gateway handles the configured
   `--cluster-cidr` (`10.42.0.0/16`) and `--service-cidr` (`10.43.0.0/16`) on
   macOS.
 
 The Kubernetes Node's `ExternalIP` is informational; Flannel uses its own
 `public-ip` annotation. Peer discovery uses `$KUBECONFIG` or `~/.kube/config`
 by default, and `--peer-kubeconfig`/`--peer-context` can select a dedicated
-read-only credential. The remote selection is currently single-peer, so
-`--vxlan-remote` should point at a healthy Linux Flannel node. Clean shutdown
-removes the annotations, routes, and ARP entry before stopping the child. An
-unclean kill can leave temporary host routes or stale remote FDB state behind.
+read-only credential. `--vxlan-remote` should point at a healthy Linux Flannel
+node because it remains the ServiceCIDR and unmapped fallback peer. Clean
+shutdown removes the annotations, per-peer routes, ARP entries, and aliases
+before stopping the child. An unclean kill can leave temporary host routes or
+stale remote FDB state behind.
 
 Do not start another process that owns the same local UDP endpoint. VXLAN and
 route setup require root or equivalent macOS networking entitlements.
@@ -362,7 +368,6 @@ route setup require root or equivalent macOS networking entitlements.
 
 Not implemented yet:
 
-- multi-peer VXLAN fan-out and failover;
 - automatic cleanup after an unclean process kill;
 - a native Darwin CNI implementation;
 - full kubelet-compatible Pod lifecycle semantics, including sidecars,
