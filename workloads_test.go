@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestWorkloadJournalRoundTrip(t *testing.T) {
@@ -209,6 +210,28 @@ func TestDesiredPodStatus(t *testing.T) {
 		if condition.Type == "PodScheduled" && condition.Status != "True" {
 			t.Fatalf("PodScheduled condition not updated: %#v", status.Conditions)
 		}
+	}
+}
+
+func TestDesiredPodStatusIncludesMackerExit(t *testing.T) {
+	started := time.Date(2026, 8, 30, 18, 0, 0, 0, time.UTC)
+	finished := started.Add(time.Second)
+	exitCode := int32(17)
+	inspection := &mackerInspection{
+		ExitCode: &exitCode, StartedAt: &started, FinishedAt: &finished,
+		TerminationReason: "exited-with-error", TerminationSignal: "",
+	}
+	pod := Pod{Metadata: ObjectMeta{Name: "web", Namespace: "default"}, Spec: PodSpec{Containers: []ContainerSpec{{Name: "web", Image: "example/web:latest"}}}}
+	status := desiredPodStatus(pod, "192.168.137.111", "Failed", "10.42.8.3", "MacletWorkloadFailed", "Macker workload exited with code 17", false, 0, inspection)
+	if len(status.ContainerStatuses) != 1 {
+		t.Fatalf("container statuses = %#v", status.ContainerStatuses)
+	}
+	terminated := status.ContainerStatuses[0].State.Terminated
+	if terminated == nil || terminated.ExitCode != 17 || terminated.StartedAt != started.Format(time.RFC3339Nano) || terminated.FinishedAt != finished.Format(time.RFC3339Nano) {
+		t.Fatalf("terminated status = %#v", terminated)
+	}
+	if !strings.Contains(terminated.Message, "exited-with-error") {
+		t.Fatalf("terminated message = %q", terminated.Message)
 	}
 }
 

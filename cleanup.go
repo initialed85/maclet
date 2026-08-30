@@ -57,7 +57,9 @@ func cleanupTerminatingPods(ctx context.Context, client *APIClient, nodeName, na
 	removed := 0
 	var cleanupErrors []error
 	for _, pod := range pods {
-		if pod.Metadata.DeletionTimestamp == "" {
+		// Keep the label and node checks client-side as a defense-in-depth
+		// measure in addition to the API field/label selectors.
+		if pod.Spec.NodeName != nodeName || !podHasNativeLabel(pod) || pod.Metadata.DeletionTimestamp == "" {
 			continue
 		}
 		deletedAt, err := time.Parse(time.RFC3339Nano, pod.Metadata.DeletionTimestamp)

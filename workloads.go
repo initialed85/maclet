@@ -31,6 +31,17 @@ type managedWorkload struct {
 	RetryAfter    time.Time
 }
 
+type mackerInspection struct {
+	Status            string     `json:"status"`
+	PID               int        `json:"pid"`
+	WorkloadPID       int        `json:"workload_pid"`
+	ExitCode          *int32     `json:"exit_code"`
+	StartedAt         *time.Time `json:"started_at"`
+	FinishedAt        *time.Time `json:"finished_at"`
+	TerminationSignal string     `json:"termination_signal"`
+	TerminationReason string     `json:"termination_reason"`
+}
+
 type workloadJournalRecord struct {
 	UID           string `json:"uid"`
 	Namespace     string `json:"namespace,omitempty"`
@@ -172,6 +183,21 @@ func (m *workloadManager) containerStatus(name string) (string, bool, error) {
 	}
 	status, found := mackerContainerStatus(string(output), name)
 	return status, found, nil
+}
+
+func (m *workloadManager) containerInspection(name string) (*mackerInspection, bool, error) {
+	output, err := m.mackerOutput("inspect", "--format", "json", name)
+	if err != nil {
+		// Keep compatibility with Macker versions predating inspect. The
+		// lifecycle reconciler can still use ps status, but cannot report an
+		// exit code until the newer Macker binary is installed.
+		return nil, false, nil
+	}
+	var inspection mackerInspection
+	if err := json.Unmarshal(output, &inspection); err != nil {
+		return nil, true, fmt.Errorf("decode Macker inspect output for %s: %w", name, err)
+	}
+	return &inspection, true, nil
 }
 
 func workloadContainerName(pod Pod) string {
@@ -472,8 +498,12 @@ func setPodCondition(conditions []PodCondition, condition PodCondition) []PodCon
 	return updated
 }
 
-func desiredPodStatus(pod Pod, nodeIP, phase, ip, reason, message string, running bool, restartCount int32) PodStatus {
+func desiredPodStatus(pod Pod, nodeIP, phase, ip, reason, message string, running bool, restartCount int32, termination ...*mackerInspection) PodStatus {
 	status := pod.Status
+	var inspection *mackerInspection
+	if len(termination) > 0 {
+		inspection = termination[0]
+	}
 	status.Phase = phase
 	status.PodIP = ip
 	status.PodIPs = nil
@@ -504,7 +534,31 @@ func desiredPodStatus(pod Pod, nodeIP, phase, ip, reason, message string, runnin
 	case running:
 		container.State.Running = &ContainerStateRunning{StartedAt: stamp}
 	case phase == "Succeeded" || phase == "Failed":
-		container.State.Terminated = &ContainerStateTerminated{Reason: reason, Message: message, FinishedAt: stamp}
+		terminated := &ContainerStateTerminated{Reason: reason, Message: message, FinishedAt: stamp}
+		if inspection != nil {
+			if inspection.ExitCode != nil {
+				terminated.ExitCode = *inspection.ExitCode
+			}
+			if inspection.StartedAt != nil {
+				terminated.StartedAt = inspection.StartedAt.UTC().Format(time.RFC3339Nano)
+			}
+			if inspection.FinishedAt != nil {
+				terminated.FinishedAt = inspection.FinishedAt.UTC().Format(time.RFC3339Nano)
+			}
+			if inspection.TerminationReason != "" || inspection.TerminationSignal != "" {
+				terminationDetail := inspection.TerminationReason
+				if inspection.TerminationSignal != "" {
+					if terminationDetail != "" {
+						terminationDetail += "; "
+					}
+					terminationDetail += "signal=" + inspection.TerminationSignal
+				}
+				if terminationDetail != "" {
+					terminated.Message += "; Macker termination: " + terminationDetail
+				}
+			}
+		}
+		container.State.Terminated = terminated
 	default:
 		container.State.Waiting = &ContainerStateWaiting{Reason: reason, Message: message}
 	}
@@ -569,8 +623,8 @@ func podHasNativeLabel(pod Pod) bool {
 	return pod.Metadata.Labels[nativeWorkloadLabelKey] == nativeWorkloadLabelValue
 }
 
-func (m *workloadManager) updateStatus(ctx context.Context, client *APIClient, pod *Pod, phase, ip, reason, message string, running bool, restartCount int32) error {
-	desired := desiredPodStatus(*pod, m.nodeIP, phase, ip, reason, message, running, restartCount)
+func (m *workloadManager) updateStatus(ctx context.Context, client *APIClient, pod *Pod, phase, ip, reason, message string, running bool, restartCount int32, termination ...*mackerInspection) error {
+	desired := desiredPodStatus(*pod, m.nodeIP, phase, ip, reason, message, running, restartCount, termination...)
 	updated, err := updatePodStatus(ctx, client, pod, desired)
 	if err != nil {
 		return err
@@ -760,24 +814,44 @@ func (m *workloadManager) reconcile(ctx context.Context, client *APIClient, pods
 			continue
 		}
 		if found && status != "running" {
+			inspection, inspectionAvailable, inspectErr := m.containerInspection(managed.ContainerName)
+			if inspectErr != nil {
+				reconcileErrors = append(reconcileErrors, inspectErr)
+				managed.RetryAfter = time.Now().Add(workloadRetryDelay)
+				continue
+			}
+			if !inspectionAvailable {
+				inspection = nil
+			}
 			switch podRestartPolicy(*pod) {
-			case "Never":
+			case "Never", "OnFailure":
 				phase := "Succeeded"
 				reason := "MacletWorkloadCompleted"
-				if status == "exited" {
-					// Macker currently exposes lifecycle state but not the exit
-					// code through its CLI. Treat an exited Never workload as
-					// completed and preserve that limitation in the reason.
-					phase = "Succeeded"
+				message := "Macker stopped the workload"
+				if podRestartPolicy(*pod) == "OnFailure" {
+					phase = "Failed"
+					reason = "MacletWorkloadExited"
+					message = "Macker workload exited"
+				}
+				if inspection != nil && inspection.ExitCode != nil {
+					if *inspection.ExitCode != 0 {
+						phase = "Failed"
+						reason = "MacletWorkloadFailed"
+						message = fmt.Sprintf("Macker workload exited with code %d", *inspection.ExitCode)
+					} else {
+						phase = "Succeeded"
+						reason = "MacletWorkloadCompleted"
+						message = "Macker workload exited successfully"
+					}
+				} else if inspection == nil {
+					if podRestartPolicy(*pod) == "Never" {
+						message = "Macker stopped the workload; exit code is not available through the current Macker CLI"
+					} else {
+						message = "Macker workload exited; exit code is not available through the current Macker CLI"
+					}
 				}
 				_ = m.stopContainer(managed)
-				if err := m.updateStatus(ctx, client, pod, phase, ip, reason, "Macker stopped the workload", false, managed.RestartCount); err != nil {
-					reconcileErrors = append(reconcileErrors, err)
-				}
-				continue
-			case "OnFailure":
-				_ = m.stopContainer(managed)
-				if err := m.updateStatus(ctx, client, pod, "Failed", ip, "MacletWorkloadExited", "Macker workload exited; exit code is not available through the current Macker CLI", false, managed.RestartCount); err != nil {
+				if err := m.updateStatus(ctx, client, pod, phase, ip, reason, message, false, managed.RestartCount, inspection); err != nil {
 					reconcileErrors = append(reconcileErrors, err)
 				}
 				continue
