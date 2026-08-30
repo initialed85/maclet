@@ -288,8 +288,11 @@ slice supports writable `hostPath` volumes through Macker's live symlink-backed
 Macker cannot enforce read-only mounts, so `readOnly` and `subPathExpr` mounts
 are rejected. Multiple containers, non-hostPath volume sources, `valueFrom`
 environment entries, custom working directories, and `hostPort` mappings are
-also rejected. Supply `--macker-binary` to `join` when Macker is not on
-`PATH`; image layouts must already be available in Macker's image store.
+also rejected. With a recent Macker, maclet records the actual exit code and
+termination timestamps in the Kubernetes container status; older Macker
+binaries retain the previous status-only fallback. Supply `--macker-binary` to
+`join` when Macker is not on `PATH`; image layouts must already be available in
+Macker's image store.
 
 maclet persists ownership records in `<state-dir>/workloads.json` before
 starting a native workload. On startup it reconciles those records against
@@ -321,7 +324,8 @@ with `--kubeconfig` and optionally `--context`. The controller lists only
 those whose deletion timestamp is older than `--stale-after`. Install its
 `get/list/delete` Pod Role only in the namespace containing trusted-native
 workloads; do not reuse a broad administrator kubeconfig for an always-on
-controller.
+controller. `examples/maclet-cleanup-rbac.yaml` provides the namespace-scoped
+ServiceAccount, Role, and RoleBinding for this example.
 
 ### Service and Ingress caveat
 

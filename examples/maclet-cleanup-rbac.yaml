@@ -1,0 +1,37 @@
+# Install this in the namespace dedicated to trusted-native workloads.
+# The cleanup controller filters by node and k8s-darwin.dev/native=true in
+# code, but namespace scoping keeps its delete permission bounded.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: maclet-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: maclet-cleanup
+  namespace: maclet-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: maclet-cleanup
+  namespace: maclet-system
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: maclet-cleanup
+  namespace: maclet-system
+subjects:
+  - kind: ServiceAccount
+    name: maclet-cleanup
+    namespace: maclet-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: maclet-cleanup
