@@ -299,6 +299,30 @@ maclet-owned marker, drains its native workloads, and then removes the
 networking state. A later join removes only that marker; an operator-applied
 cordon is preserved.
 
+### Stale Pod cleanup controller
+
+maclet also includes an optional `cleanup-controller` for API objects that are
+already terminating but remain after a failed node shutdown. It must run with
+a separately scoped ServiceAccount; the restricted `system:node:maclet`
+identity is intentionally not granted Pod deletion:
+
+```sh
+./maclet cleanup-controller \
+  --node-name maclet \
+  --namespace maclet-system \
+  --interval 15s \
+  --stale-after 45s
+```
+
+When run inside Kubernetes, the controller uses the mounted in-cluster
+ServiceAccount token. Outside the cluster, pass an explicit cleanup kubeconfig
+with `--kubeconfig` and optionally `--context`. The controller lists only
+`k8s-darwin.dev/native=true` Pods assigned to the selected Node and force-deletes
+those whose deletion timestamp is older than `--stale-after`. Install its
+`get/list/delete` Pod Role only in the namespace containing trusted-native
+workloads; do not reuse a broad administrator kubeconfig for an always-on
+controller.
+
 ### Service and Ingress caveat
 
 The example Service is `ClusterIP`, so it does not need ServiceLB. The existing
