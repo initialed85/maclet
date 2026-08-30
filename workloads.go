@@ -255,6 +255,9 @@ func mackerVolumeArgs(pod Pod, container ContainerSpec) ([]string, error) {
 		if mount.ReadOnly {
 			return nil, fmt.Errorf("volume mount %q requests readOnly, but Macker hostPath volumes are writable live symlinks", mountPath)
 		}
+		if mount.SubPathExpr != "" {
+			return nil, fmt.Errorf("volume mount %q uses subPathExpr, which maclet does not support", mountPath)
+		}
 		hostPath, exists := volumes[mount.Name]
 		if !exists {
 			if _, declared := volumeTypes[mount.Name]; declared {

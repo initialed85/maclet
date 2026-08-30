@@ -590,10 +590,11 @@ type ObjectFieldSelector struct {
 }
 
 type VolumeMount struct {
-	Name      string `json:"name,omitempty"`
-	MountPath string `json:"mountPath,omitempty"`
-	SubPath   string `json:"subPath,omitempty"`
-	ReadOnly  bool   `json:"readOnly,omitempty"`
+	Name        string `json:"name,omitempty"`
+	MountPath   string `json:"mountPath,omitempty"`
+	SubPath     string `json:"subPath,omitempty"`
+	SubPathExpr string `json:"subPathExpr,omitempty"`
+	ReadOnly    bool   `json:"readOnly,omitempty"`
 }
 
 type PodIP struct {
