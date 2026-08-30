@@ -5,21 +5,25 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
 
 const (
-	nativeWorkloadLabelKey   = "k8s-darwin.dev/native"
-	nativeWorkloadLabelValue = "true"
-	workloadRetryDelay       = 10 * time.Second
+	nativeWorkloadLabelKey             = "k8s-darwin.dev/native"
+	nativeWorkloadLabelValue           = "true"
+	nativeDisablePortForwardAnnotation = "k8s-darwin.dev/disable-port-forward"
+	workloadRetryDelay                 = 10 * time.Second
 )
 
 type managedWorkload struct {
@@ -65,6 +69,7 @@ type workloadManager struct {
 	nodeIP       string
 	journalPath  string
 	workloads    map[string]*managedWorkload
+	debug        bool
 	mu           sync.RWMutex
 }
 
@@ -156,6 +161,14 @@ func (m *workloadManager) persistJournalLocked() error {
 	return nil
 }
 
+func formatCommandArgs(args []string) string {
+	quoted := make([]string, len(args))
+	for index, arg := range args {
+		quoted[index] = strconv.Quote(arg)
+	}
+	return strings.Join(quoted, " ")
+}
+
 func (m *workloadManager) mackerCommand(args ...string) (*exec.Cmd, error) {
 	binary := m.mackerBinary
 	if binary == "" {
@@ -201,6 +214,50 @@ func (m *workloadManager) containerStatus(name string) (string, bool, error) {
 	}
 	status, found := mackerContainerStatus(string(output), name)
 	return status, found, nil
+}
+
+func (m *workloadManager) waitForMackerRunning(name string) error {
+	// Macker's launcher can remain alive briefly after the native workload has
+	// already exited. Prefer inspect's workload lifecycle status over `ps` so
+	// startup failures (for example EADDRINUSE) are not reported as Ready.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		inspection, inspectionAvailable, err := m.containerInspection(name)
+		if err != nil {
+			return err
+		}
+		if inspectionAvailable {
+			if inspection.Status != "running" {
+				message := fmt.Sprintf("Macker workload exited during startup (status=%s)", inspection.Status)
+				if output, logsErr := m.mackerOutput("logs", name); logsErr == nil && strings.TrimSpace(string(output)) != "" {
+					message += ": " + strings.TrimSpace(string(output))
+				}
+				return errors.New(message)
+			}
+			// A launcher can report running while its child is still in a
+			// startup retry loop. Hold the readiness decision until the
+			// startup window has elapsed, then inspect once more.
+			if time.Now().After(deadline) {
+				return nil
+			}
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+		status, found, err := m.containerStatus(name)
+		if err != nil {
+			return err
+		}
+		if found && status == "running" {
+			return nil
+		}
+		if found && status != "running" {
+			return fmt.Errorf("Macker workload exited during startup (status=%s)", status)
+		}
+		if time.Now().After(deadline) {
+			return errors.New("Macker workload did not become running within 5 seconds")
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 }
 
 func (m *workloadManager) findContainer(namespace, podName, containerName string) (*managedWorkload, error) {
@@ -464,6 +521,10 @@ func (m *workloadManager) runArgs(pod Pod, container ContainerSpec, managed *man
 		"--name", managed.ContainerName,
 	}
 	args = append(args, volumeArgs...)
+	// Native workloads use per-Pod PF remapping by default. Opt out only for
+	// images that cannot consume the MACKER_PORT_N value (for example, an
+	// application with a hard-coded listener port).
+	portForward := pod.Metadata.Annotations[nativeDisablePortForwardAnnotation] != "true"
 	for _, env := range container.Env {
 		if env.Name == "" {
 			return nil, errors.New("container environment variable has an empty name")
@@ -487,10 +548,14 @@ func (m *workloadManager) runArgs(pod Pod, container ContainerSpec, managed *man
 		if protocol != "TCP" && protocol != "UDP" {
 			return nil, fmt.Errorf("container port %d uses unsupported protocol %q", port.ContainerPort, port.Protocol)
 		}
-		// Macker's config-token expansion consumes MACKER_PORT_N. These are
-		// workload environment values, not host PF publications; the Pod IP
-		// itself is already directly reachable through the VXLAN bridge.
-		args = append(args, "--env", fmt.Sprintf("MACKER_PORT_%d=%d", index+1, port.ContainerPort))
+		// Macker allocates a unique process port and PF-redirects PodIP:port
+		// to it, allowing overlapping rollout generations. An explicitly
+		// opted-out workload receives its declared port directly instead.
+		if portForward {
+			args = append(args, "-p", fmt.Sprintf("%d:auto/%s", port.ContainerPort, strings.ToLower(protocol)))
+		} else {
+			args = append(args, "--env", fmt.Sprintf("MACKER_PORT_%d=%d", index+1, port.ContainerPort))
+		}
 	}
 	if len(container.Command) > 0 {
 		args = append(args, "--entrypoint", container.Command[0])
@@ -767,6 +832,15 @@ func (m *workloadManager) reconcile(ctx context.Context, client *APIClient, pods
 			if err := m.persistJournalLocked(); err != nil {
 				reconcileErrors = append(reconcileErrors, fmt.Errorf("persist deleted Pod %s/%s cleanup: %w", pod.Metadata.Namespace, pod.Metadata.Name, err))
 			}
+			// A real kubelet reports the workload terminal before the API server
+			// finishes a graceful Pod deletion. Without that acknowledgement,
+			// deleting a native Pod can leave it stuck in Terminating forever.
+			if err := m.updateStatus(ctx, client, pod, "Failed", pod.Status.PodIP, "MacletWorkloadDeleted", "maclet stopped the native workload for Pod deletion", false, workload.RestartCount); err != nil {
+				var apiErr *HTTPError
+				if !errors.As(err, &apiErr) || apiErr.Code != http.StatusNotFound {
+					reconcileErrors = append(reconcileErrors, err)
+				}
+			}
 			continue
 		}
 		if !podHasNativeLabel(*pod) {
@@ -775,7 +849,10 @@ func (m *workloadManager) reconcile(ctx context.Context, client *APIClient, pods
 		seen[uid] = true
 		if len(pod.Spec.Containers) != 1 {
 			err := fmt.Errorf("Pod %s/%s must declare exactly one container; maclet does not support sidecars yet", pod.Metadata.Namespace, pod.Metadata.Name)
-			if statusErr := m.updateStatus(ctx, client, pod, "Failed", pod.Status.PodIP, "MacletUnsupportedPod", err.Error(), false, 0); statusErr != nil {
+			// Configuration errors are Pending, not terminal Failed: a ReplicaSet
+			// replaces terminal Pods, which can create an unbounded stream of
+			// identical Pods when a native feature is unsupported.
+			if statusErr := m.updateStatus(ctx, client, pod, "Pending", pod.Status.PodIP, "MacletUnsupportedPod", err.Error(), false, 0); statusErr != nil {
 				reconcileErrors = append(reconcileErrors, statusErr)
 			}
 			continue
@@ -816,7 +893,7 @@ func (m *workloadManager) reconcile(ctx context.Context, client *APIClient, pods
 		}
 		if err := m.network.validateWorkloadAddress(ip); err != nil {
 			reconcileErrors = append(reconcileErrors, fmt.Errorf("Pod %s/%s has invalid PodIP %s: %w", pod.Metadata.Namespace, pod.Metadata.Name, ip, err))
-			_ = m.updateStatus(ctx, client, pod, "Failed", ip, "MacletInvalidPodIP", err.Error(), false, managed.RestartCount)
+			_ = m.updateStatus(ctx, client, pod, "Pending", ip, "MacletInvalidPodIP", err.Error(), false, managed.RestartCount)
 			continue
 		}
 		if managed.IP != "" && managed.IP != ip {
@@ -868,6 +945,14 @@ func (m *workloadManager) reconcile(ctx context.Context, client *APIClient, pods
 			if !inspectionAvailable {
 				inspection = nil
 			}
+			if m.debug {
+				log.Printf("debug: Macker container %s status=%s inspection=%+v", managed.ContainerName, status, inspection)
+				if output, logsErr := m.mackerOutput("logs", managed.ContainerName); logsErr != nil {
+					log.Printf("debug: Macker logs for %s unavailable: %v", managed.ContainerName, logsErr)
+				} else if trimmed := strings.TrimSpace(string(output)); trimmed != "" {
+					log.Printf("debug: Macker logs for %s: %q", managed.ContainerName, trimmed)
+				}
+			}
 			switch podRestartPolicy(*pod) {
 			case "Never", "OnFailure":
 				phase := "Succeeded"
@@ -916,13 +1001,31 @@ func (m *workloadManager) reconcile(ctx context.Context, client *APIClient, pods
 		}
 		args, err := m.runArgs(*pod, pod.Spec.Containers[0], managed)
 		if err != nil {
+			if m.debug {
+				log.Printf("debug: cannot construct Macker invocation for %s/%s: %v", pod.Metadata.Namespace, pod.Metadata.Name, err)
+			}
 			reconcileErrors = append(reconcileErrors, fmt.Errorf("prepare Macker workload %s/%s: %w", pod.Metadata.Namespace, pod.Metadata.Name, err))
 			managed.RetryAfter = time.Now().Add(workloadRetryDelay)
-			_ = m.updateStatus(ctx, client, pod, "Failed", ip, "MacletMackerLaunchFailed", err.Error(), false, managed.RestartCount)
+			// Keep invalid configuration Pending so ReplicaSets do not treat the
+			// Pod as dead and create another copy on every reconciliation.
+			_ = m.updateStatus(ctx, client, pod, "Pending", ip, "MacletMackerLaunchFailed", err.Error(), false, managed.RestartCount)
 			continue
+		}
+		if m.debug {
+			log.Printf("debug: Macker invocation for %s/%s: %s", pod.Metadata.Namespace, pod.Metadata.Name, formatCommandArgs(args))
 		}
 		if _, err := m.mackerOutput(args...); err != nil {
 			reconcileErrors = append(reconcileErrors, fmt.Errorf("start Macker workload %s/%s: %w", pod.Metadata.Namespace, pod.Metadata.Name, err))
+			managed.RetryAfter = time.Now().Add(workloadRetryDelay)
+			_ = m.updateStatus(ctx, client, pod, "Pending", ip, "MacletMackerLaunchFailed", err.Error(), false, managed.RestartCount)
+			continue
+		}
+		if err := m.waitForMackerRunning(managed.ContainerName); err != nil {
+			if m.debug {
+				log.Printf("debug: Macker startup failed for %s/%s: %v", pod.Metadata.Namespace, pod.Metadata.Name, err)
+			}
+			_ = m.stopContainer(managed)
+			reconcileErrors = append(reconcileErrors, fmt.Errorf("Macker workload %s/%s did not start: %w", pod.Metadata.Namespace, pod.Metadata.Name, err))
 			managed.RetryAfter = time.Now().Add(workloadRetryDelay)
 			_ = m.updateStatus(ctx, client, pod, "Pending", ip, "MacletMackerLaunchFailed", err.Error(), false, managed.RestartCount)
 			continue

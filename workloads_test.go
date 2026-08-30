@@ -83,7 +83,10 @@ func TestWorkloadContainerName(t *testing.T) {
 func TestWorkloadRunArgs(t *testing.T) {
 	manager := newWorkloadManager(&DarwinNetworkHandle{Interface: "bridge101", PodCIDR: "10.42.8.0/24", Gateway: "10.42.8.2"}, "/usr/local/bin/macker", "192.168.137.111")
 	pod := Pod{
-		Metadata: ObjectMeta{Namespace: "default", Name: "web", UID: "uid-1"},
+		Metadata: ObjectMeta{
+			Namespace: "default", Name: "web", UID: "uid-1",
+			Annotations: map[string]string{nativeDisablePortForwardAnnotation: "true"},
+		},
 		Spec: PodSpec{Containers: []ContainerSpec{{
 			Name: "web", Image: "initialed85/nginx-darwin:latest",
 			Command: []string{"/bin/nginx"}, Args: []string{"-g", "daemon off;"},
@@ -108,6 +111,24 @@ func TestWorkloadRunArgs(t *testing.T) {
 	if _, err := manager.runArgs(pod, pod.Spec.Containers[0], managed); err == nil {
 		t.Fatal("runArgs accepted unsupported hostPort")
 	}
+	pod.Spec.Containers[0].Ports[0].HostPort = 0
+	delete(pod.Metadata.Annotations, nativeDisablePortForwardAnnotation)
+	args, err = manager.runArgs(pod, pod.Spec.Containers[0], managed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(args, "\x00")
+	if !strings.Contains(joined, "-p\x008080:auto/tcp") || strings.Contains(joined, "MACKER_PORT_1=8080") {
+		t.Fatalf("port-forward run args = %#v", args)
+	}
+	pod.Spec.Containers[0].Ports[0].Protocol = "UDP"
+	args, err = manager.runArgs(pod, pod.Spec.Containers[0], managed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.Join(args, "\x00"), "-p\x008080:auto/udp") {
+		t.Fatalf("UDP port-forward run args = %#v", args)
+	}
 }
 
 func TestMackerVolumeArgs(t *testing.T) {
@@ -131,14 +152,14 @@ func TestMackerVolumeArgs(t *testing.T) {
 		},
 	}}
 	container := ContainerSpec{VolumeMounts: []VolumeMount{
-		{Name: "content", MountPath: "/usr/share/nginx/html", SubPath: "index.html"},
+		{Name: "content", MountPath: "/usr/share/nginx/html/index.html", SubPath: "index.html"},
 		{Name: "config", MountPath: "/etc/example/config.txt"},
 	}}
 	args, err := mackerVolumeArgs(pod, container)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"-v", index + ":/usr/share/nginx/html", "-v", config + ":/etc/example/config.txt"}
+	want := []string{"-v", index + ":/usr/share/nginx/html/index.html", "-v", config + ":/etc/example/config.txt"}
 	if strings.Join(args, "\x00") != strings.Join(want, "\x00") {
 		t.Fatalf("mackerVolumeArgs() = %#v, want %#v", args, want)
 	}

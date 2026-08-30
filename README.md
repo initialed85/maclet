@@ -178,6 +178,13 @@ metadata:
     app: nginx-native
 spec:
   replicas: 1
+  # maclet's default PF port remapping gives each generation a distinct
+  # internal port, so generations can overlap during a normal rollout.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
   selector:
     matchLabels:
       app: nginx-native
@@ -197,8 +204,8 @@ spec:
       volumes:
         - name: index-html
           hostPath:
-            path: /Users/edwardbeech/Desktop/index.html
-            type: File
+            path: /Users/edwardbeech/Desktop
+            type: Directory
       containers:
         - name: nginx
           image: docker.io/initialed85/nginx:latest
@@ -208,7 +215,7 @@ spec:
               protocol: TCP
           volumeMounts:
             - name: index-html
-              mountPath: /usr/share/nginx/html/
+              mountPath: /usr/share/nginx/html/index.html
               subPath: index.html
 ---
 apiVersion: v1
@@ -272,36 +279,65 @@ kubectl --context home-dev get pod,svc,ingress -l app=nginx-native -o wide
 kubectl --context home-dev get endpointslice -l kubernetes.io/service-name=nginx-native -o wide
 ```
 
+For a repeatable create/rollout/volume/teardown check, run
+[`test-native-workload-lifecycle.sh`](test-native-workload-lifecycle.sh). It
+uses a temporary namespace and hostPath, checks that an invalid volume leaves
+one Pending Pod instead of creating replacements, verifies a valid file mount,
+and ensures teardown leaves no native Pods behind. By default it uses PF port
+remapping and declared port 8080; set
+`MACLET_TEST_REMOTE=user@linux-node` to validate the full PodIP path from a
+Linux cluster node (local macOS loopback does not exercise PF rdr rules).
+
 Such a Pod is eligible for the initial native runtime when `join` has VXLAN
 enabled and can find Macker. maclet advertises capacity for up to 110 Pods so
 the Kubernetes scheduler can place workloads; this is a scheduling hint, not a
 hard process or resource limit. maclet currently supports one container per
 Pod, uses the PodCIDR's `.1` bridge address and `.2` synthetic gateway as
-reserved addresses, and allocates workload aliases from `.3` upward. It
-invokes:
+reserved addresses, and allocates workload aliases from `.3` upward. Since
+native processes share the host network stack, so workloads that cannot
+consume a dynamic port must avoid overlap (`maxSurge: 0`, `maxUnavailable: 1`)
+and opt out of PF remapping. Workloads whose image honors `MACKER_PORT_N`
+use per-Pod PF remapping by default, allowing normal overlapping rollouts;
+set the `k8s-darwin.dev/disable-port-forward: "true"` Pod-template annotation
+only for the direct-port fallback. It invokes:
 
 ```text
 macker run --detach --net=external --interface <vxlan-bridge> --ip <pod-ip>
   --host-interface <vxlan-bridge> --host-ip <bridge-ip> --name <generated-name>
-  [-v HOST:CONTAINER ...] [--env KEY=VALUE ...] [--entrypoint COMMAND] IMAGE [-- ARGS...]
+  [-v HOST:CONTAINER ...] [--env KEY=VALUE ...] [--entrypoint COMMAND]
+  [-p CONTAINER_PORT:auto/tcp|udp ...] IMAGE [-- ARGS...]
 ```
 
-Container ports become `MACKER_PORT_N` environment values for image
-configuration templates; they do not create host PF publications. The
-Kubernetes Pod status is updated with the allocated Pod IP, host IP, phase,
+By default, each TCP/UDP container port becomes a Macker mapping such as
+`-p 8080:auto/tcp`; Macker allocates and persists a unique process port, injects
+it as `MACKER_PORT_N`, and PF redirects traffic addressed to that Pod IP and
+declared port. The image must honor `MACKER_PORT_N` (for example, the bundled
+nginx image substitutes it in its configuration). To use a fixed direct port
+instead, set the Pod-template annotation
+`k8s-darwin.dev/disable-port-forward: "true"`; maclet then supplies the
+container port directly as `MACKER_PORT_N` and does not install PF mappings.
+The Kubernetes Pod status is updated with the allocated
+Pod IP, host IP, phase,
 conditions, and native container state. A terminating/deleted Pod stops and
-removes its Macker container and releases its address alias. The first runtime
+removes its Macker container and releases its address alias. The long-running
+join also uses the separate peer identity (when configured) to force-delete
+native Pods that remain after a 5-second cleanup window; the
+restricted `system:node` identity is never used for deletion. The first runtime
 slice supports writable `hostPath` volumes through Macker's live symlink-backed
 `-v` mounts. `Directory`, `DirectoryOrCreate`, `File`, and
-`FileOrCreate` hostPath types are supported, as is a contained `subPath`.
-Macker cannot enforce read-only mounts, so `readOnly` and `subPathExpr` mounts
+`FileOrCreate` hostPath types are supported, as is a contained `subPath`. For
+file content, use a `Directory` hostPath plus `subPath` and mount the file at
+its full destination (for example, `/usr/share/nginx/html/index.html`), or use
+a `File` hostPath without `subPath`. Macker cannot enforce read-only mounts, so `readOnly` and `subPathExpr` mounts
 are rejected. Multiple containers, non-hostPath volume sources, `valueFrom`
 environment entries, custom working directories, and `hostPort` mappings are
 also rejected. With a recent Macker, maclet records the actual exit code and
 termination timestamps in the Kubernetes container status; older Macker
 binaries retain the previous status-only fallback. Supply `--macker-binary` to
 `join` when Macker is not on `PATH`; image layouts must already be available in
-Macker's image store.
+Macker's image store. Add `--debug` to log each quoted Macker invocation and,
+when a native process exits during startup, its captured Macker logs. Debug
+output can include Pod environment values, so use it only in a suitable log.
 
 When VXLAN and Macker are enabled, maclet also serves the kubelet HTTPS
 endpoint on the Node IP and port 10250 using the K3s-issued serving and client
@@ -350,7 +386,9 @@ with `--kubeconfig` and optionally `--context`. The controller lists only
 those whose deletion timestamp is older than `--stale-after`. Install its
 `get/list/delete` Pod Role only in the namespace containing trusted-native
 workloads; do not reuse a broad administrator kubeconfig for an always-on
-controller. `examples/maclet-cleanup-rbac.yaml` provides the namespace-scoped
+controller. The in-process join cleanup only needs delete permission for the
+workload namespaces because the node identity supplies the assigned-Pod list.
+`examples/maclet-cleanup-rbac.yaml` provides the namespace-scoped
 ServiceAccount, Role, and RoleBinding for this example.
 
 ### Service and Ingress caveat

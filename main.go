@@ -712,6 +712,7 @@ type JoinConfig struct {
 	Once                  bool
 	VXLANBinary           string
 	MackerBinary          string
+	Debug                 bool
 	VXLANRemote           string
 	VXLANLocal            string
 	VXLANGatewayMAC       string
@@ -2421,6 +2422,7 @@ func runJoin(cfg JoinConfig) error {
 		}
 		log.Printf("published Flannel VXLAN metadata for %s: publicIP=%s vtepMAC=%s gatewayMAC=%s", state.NodeName, vxlanPublicIP(cfg, state), vxlan.BridgeMAC, gatewayMAC)
 		workloads = newWorkloadManagerWithState(darwinNetwork, cfg.MackerBinary, state.NodeIP, cfg.StateDir)
+		workloads.debug = cfg.Debug
 		if err := workloads.loadJournal(); err != nil {
 			darwinNetwork.cleanup()
 			vxlan.cleanup()
@@ -2442,6 +2444,32 @@ func runJoin(cfg JoinConfig) error {
 			}
 			vxlan.cleanup()
 		}()
+	}
+	var cleanupStaleNativePods func(context.Context, []Pod)
+	if !cfg.Once && workloads != nil {
+		// The system:node identity is intentionally not allowed to delete Pods.
+		// Reuse the separately configured peer identity for force-deleting native
+		// Pods whose graceful deletion has outlived the kubelet grace period.
+		if peerClient == nil && (cfg.PeerKubeconfig != "" || state.PeerKubeconfig != "") {
+			peerClient, err = peerAPIClient(cfg, state)
+			if err != nil {
+				log.Printf("warning: stale native Pod cleanup unavailable: %v", err)
+			}
+		}
+		var cleanupWarningAt time.Time
+		cleanupStaleNativePods = func(cleanupContext context.Context, pods []Pod) {
+			if peerClient == nil {
+				return
+			}
+			removed, cleanupErr := cleanupPodList(cleanupContext, peerClient, pods, state.NodeName, defaultNativePodCleanupStaleAfter, time.Now())
+			if removed > 0 {
+				log.Printf("removed %d stale native Pod(s) assigned to %s", removed, state.NodeName)
+			}
+			if cleanupErr != nil && (cleanupWarningAt.IsZero() || time.Since(cleanupWarningAt) >= time.Minute) {
+				cleanupWarningAt = time.Now()
+				log.Printf("warning: stale native Pod cleanup: %v", cleanupErr)
+			}
+		}
 	}
 	if !cfg.Once && workloads != nil {
 		kubelet, kubeletErr := startKubeletServer(ctx, state.NodeIP, workloads, state.ServingCert, state.ServingKey, state.ClientCA, defaultKubeletPort)
@@ -2478,8 +2506,13 @@ func runJoin(cfg JoinConfig) error {
 	if !cfg.Once && workloads != nil {
 		if pods, listErr := listAssignedPods(ctx, client, state.NodeName); listErr != nil {
 			log.Printf("warning: list assigned workloads: %v", listErr)
-		} else if reconcileErr := workloads.reconcile(ctx, client, pods); reconcileErr != nil {
-			log.Printf("warning: reconcile native workloads: %v", reconcileErr)
+		} else {
+			if reconcileErr := workloads.reconcile(ctx, client, pods); reconcileErr != nil {
+				log.Printf("warning: reconcile native workloads: %v", reconcileErr)
+			}
+			if cleanupStaleNativePods != nil {
+				cleanupStaleNativePods(ctx, pods)
+			}
 		}
 	}
 
@@ -2532,8 +2565,13 @@ func runJoin(cfg JoinConfig) error {
 			if workloads != nil {
 				if pods, listErr := listAssignedPods(ctx, client, state.NodeName); listErr != nil {
 					log.Printf("warning: list assigned workloads: %v", listErr)
-				} else if reconcileErr := workloads.reconcile(ctx, client, pods); reconcileErr != nil {
-					log.Printf("warning: reconcile native workloads: %v", reconcileErr)
+				} else {
+					if reconcileErr := workloads.reconcile(ctx, client, pods); reconcileErr != nil {
+						log.Printf("warning: reconcile native workloads: %v", reconcileErr)
+					}
+					if cleanupStaleNativePods != nil {
+						cleanupStaleNativePods(ctx, pods)
+					}
 				}
 			}
 		}
@@ -2639,6 +2677,7 @@ func runJoinCommand(args []string) error {
 	flags.BoolVar(&cfg.Once, "once", false, "register, heartbeat once, and exit")
 	flags.StringVar(&cfg.VXLANBinary, "vxlan-binary", "", "path to darwin-vxlan; start it after PodCIDR assignment")
 	flags.StringVar(&cfg.MackerBinary, "macker-binary", "", "path to Macker; start assigned native Pods through it (defaults to PATH)")
+	flags.BoolVar(&cfg.Debug, "debug", false, "log generated Macker invocations and native workload decisions (may include environment values)")
 	flags.StringVar(&cfg.VXLANRemote, "vxlan-remote", "", "VXLAN remote underlay address")
 	flags.StringVar(&cfg.VXLANLocal, "vxlan-local", "", "VXLAN local underlay address (defaults to --node-ip)")
 	flags.StringVar(&cfg.VXLANGatewayMAC, "vxlan-gateway-mac", "", "static remote flannel.1 MAC override (normally discovered through --peer-kubeconfig)")

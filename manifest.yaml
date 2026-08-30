@@ -6,13 +6,14 @@ metadata:
     app: nginx-native
 spec:
   replicas: 1
-  # maclet's default PF port remapping assigns each generation a distinct
-  # internal port, so generations can overlap during a normal rollout.
+  # Echo-Server currently binds the explicit PORT environment value rather
+  # than consuming MACKER_PORT_1, so use the fixed-port fallback and serialize
+  # generations until the image is adapted.
   strategy:
     type: RollingUpdate
     rollingUpdate:
-      maxUnavailable: 0
-      maxSurge: 1
+      maxUnavailable: 1
+      maxSurge: 0
   selector:
     matchLabels:
       app: nginx-native
@@ -21,6 +22,8 @@ spec:
       labels:
         app: nginx-native
         k8s-darwin.dev/native: "true"
+      annotations:
+        k8s-darwin.dev/disable-port-forward: "true"
     spec:
       nodeSelector:
         k8s-darwin.dev/native: "true"
@@ -29,22 +32,26 @@ spec:
           operator: Equal
           value: "true"
           effect: NoSchedule
-      volumes:
-        - name: index-html
-          hostPath:
-            path: /Users/edwardbeech/Desktop
-            type: Directory
+      # volumes:
+      #   - name: index-html
+      #     hostPath:
+      #       path: /Users/edwardbeech/Desktop
+      #       type: Directory
       containers:
         - name: nginx
-          image: docker.io/initialed85/nginx:latest
+          # image: docker.io/initialed85/nginx:latest
+          image: initialed85/echo-server:latest
+          env:
+            - name: PORT
+              value: "8080"
           ports:
             - name: http
               containerPort: 8080
               protocol: TCP
-          volumeMounts:
-            - name: index-html
-              mountPath: /usr/share/nginx/html/index.html
-              subPath: index.html
+          # volumeMounts:
+          #   - name: index-html
+          #     mountPath: /usr/share/nginx/html/index.html
+          #     subPath: index.html
 ---
 apiVersion: v1
 kind: Service

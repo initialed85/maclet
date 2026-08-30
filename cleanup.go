@@ -17,9 +17,10 @@ import (
 )
 
 const (
-	defaultCleanupNamespace  = "maclet-system"
-	defaultCleanupInterval   = 15 * time.Second
-	defaultCleanupStaleAfter = 45 * time.Second
+	defaultCleanupNamespace           = "maclet-system"
+	defaultCleanupInterval            = 15 * time.Second
+	defaultCleanupStaleAfter          = 45 * time.Second
+	defaultNativePodCleanupStaleAfter = 5 * time.Second
 )
 
 type cleanupControllerConfig struct {
@@ -50,11 +51,7 @@ func listAssignedPodsInNamespace(ctx context.Context, client *APIClient, nodeNam
 	return pods.Items, nil
 }
 
-func cleanupTerminatingPods(ctx context.Context, client *APIClient, nodeName, namespace string, staleAfter time.Duration, now time.Time) (int, error) {
-	pods, err := listAssignedPodsInNamespace(ctx, client, nodeName, namespace)
-	if err != nil {
-		return 0, fmt.Errorf("list native Pods for cleanup: %w", err)
-	}
+func cleanupPodList(ctx context.Context, client *APIClient, pods []Pod, nodeName string, staleAfter time.Duration, now time.Time) (int, error) {
 	removed := 0
 	var cleanupErrors []error
 	for _, pod := range pods {
@@ -84,6 +81,30 @@ func cleanupTerminatingPods(ctx context.Context, client *APIClient, nodeName, na
 		log.Printf("force-deleted stale native Pod %s/%s assigned to %s", pod.Metadata.Namespace, pod.Metadata.Name, nodeName)
 	}
 	return removed, errors.Join(cleanupErrors...)
+}
+
+func cleanupTerminatingPods(ctx context.Context, client *APIClient, nodeName, namespace string, staleAfter time.Duration, now time.Time) (int, error) {
+	pods, err := listAssignedPodsInNamespace(ctx, client, nodeName, namespace)
+	if err != nil {
+		return 0, fmt.Errorf("list native Pods for cleanup: %w", err)
+	}
+	return cleanupPodList(ctx, client, pods, nodeName, staleAfter, now)
+}
+
+func cleanupTerminatingPodsClusterWide(ctx context.Context, client *APIClient, nodeName string, staleAfter time.Duration, now time.Time) (int, error) {
+	query := url.Values{
+		"fieldSelector": []string{"spec.nodeName=" + nodeName},
+		"labelSelector": []string{nativeWorkloadLabelKey + "=" + nativeWorkloadLabelValue},
+	}
+	body, err := client.get(ctx, "/api/v1/pods?"+query.Encode())
+	if err != nil {
+		return 0, fmt.Errorf("list native Pods for cluster-wide cleanup: %w", err)
+	}
+	var pods PodList
+	if err := json.Unmarshal(body, &pods); err != nil {
+		return 0, fmt.Errorf("decode cluster-wide cleanup PodList: %w", err)
+	}
+	return cleanupPodList(ctx, client, pods.Items, nodeName, staleAfter, now)
 }
 
 func runCleanupController(ctx context.Context, cfg cleanupControllerConfig) error {
