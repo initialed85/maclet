@@ -327,10 +327,24 @@ func TestCleanupTerminatingPods(t *testing.T) {
 			if got := request.URL.Query().Get("labelSelector"); got != nativeWorkloadLabelKey+"="+nativeWorkloadLabelValue {
 				t.Errorf("labelSelector = %q", got)
 			}
-			_ = json.NewEncoder(response).Encode(PodList{Items: []Pod{{
-				Metadata: ObjectMeta{Namespace: "default", Name: "stale", UID: "uid-stale", Labels: map[string]string{nativeWorkloadLabelKey: nativeWorkloadLabelValue}, DeletionTimestamp: "2026-08-30T17:00:00Z"},
-				Spec:     PodSpec{NodeName: "maclet"},
-			}}})
+			_ = json.NewEncoder(response).Encode(PodList{Items: []Pod{
+				{
+					Metadata: ObjectMeta{Namespace: "default", Name: "stale", UID: "uid-stale", Labels: map[string]string{nativeWorkloadLabelKey: nativeWorkloadLabelValue}, DeletionTimestamp: "2026-08-30T17:00:00Z"},
+					Spec:     PodSpec{NodeName: "maclet"},
+				},
+				{
+					Metadata: ObjectMeta{Namespace: "default", Name: "fresh", UID: "uid-fresh", Labels: map[string]string{nativeWorkloadLabelKey: nativeWorkloadLabelValue}},
+					Spec:     PodSpec{NodeName: "maclet"},
+				},
+				{
+					Metadata: ObjectMeta{Namespace: "default", Name: "other-node", UID: "uid-other", Labels: map[string]string{nativeWorkloadLabelKey: nativeWorkloadLabelValue}, DeletionTimestamp: "2026-08-30T17:00:00Z"},
+					Spec:     PodSpec{NodeName: "other"},
+				},
+				{
+					Metadata: ObjectMeta{Namespace: "default", Name: "unmanaged", UID: "uid-unmanaged", Labels: map[string]string{"example.test/owner": "someone-else"}, DeletionTimestamp: "2026-08-30T17:00:00Z"},
+					Spec:     PodSpec{NodeName: "maclet"},
+				},
+			}})
 		case http.MethodDelete:
 			if request.URL.Path != "/api/v1/namespaces/default/pods/stale" || request.URL.Query().Get("gracePeriodSeconds") != "0" {
 				t.Fatalf("delete request = %s?%s", request.URL.Path, request.URL.RawQuery)
