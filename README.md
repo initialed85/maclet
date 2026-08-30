@@ -254,6 +254,7 @@ macker pull docker.io/initialed85/nginx:latest
   --node-ip 192.168.137.111 \
   --vxlan-binary ../darwin-vxlan/target/release/darwin-vxlan \
   --vxlan-remote 192.168.1.111 \
+  --drain-timeout 10s \
   --macker-binary "$(command -v macker)"
 
 kubectl --context home-dev apply -f examples/nginx-native.yaml
@@ -273,7 +274,7 @@ invokes:
 ```text
 macker run --detach --net=external --interface <vxlan-bridge> --ip <pod-ip>
   --host-interface <vxlan-bridge> --host-ip <bridge-ip> --name <generated-name>
-  [--env KEY=VALUE ...] [--entrypoint COMMAND] IMAGE [-- ARGS...]
+  [-v HOST:CONTAINER ...] [--env KEY=VALUE ...] [--entrypoint COMMAND] IMAGE [-- ARGS...]
 ```
 
 Container ports become `MACKER_PORT_N` environment values for image
@@ -289,6 +290,14 @@ are rejected. Multiple containers, non-hostPath volume sources, `valueFrom`
 environment entries, custom working directories, and `hostPort` mappings are
 also rejected. Supply `--macker-binary` to `join` when Macker is not on
 `PATH`; image layouts must already be available in Macker's image store.
+
+maclet persists ownership records in `<state-dir>/workloads.json` before
+starting a native workload. On startup it reconciles those records against
+Pods and Macker, removing owned containers and Pod IP aliases whose Pods no
+longer exist. On `SIGINT` or `SIGTERM`, maclet first cordons its Node with a
+maclet-owned marker, drains its native workloads, and then removes the
+networking state. A later join removes only that marker; an operator-applied
+cordon is preserved.
 
 ### Service and Ingress caveat
 
