@@ -1361,6 +1361,11 @@ func startVXLAN(ctx context.Context, cfg JoinConfig, node *Node) (*VXLANHandle, 
 		"--mtu", fmt.Sprint(cfg.VXLANMTU),
 		"--bridge-ipv4", bridgeCIDR,
 	}
+	if existingBridge, err := interfaceForAddress(bridgeCIDR); err != nil {
+		return nil, fmt.Errorf("inspect existing VXLAN bridge address: %w", err)
+	} else if existingBridge != "" {
+		return nil, fmt.Errorf("VXLAN bridge address %s is already present on %s; clean up the existing tunnel before starting another", bridgeCIDR, existingBridge)
+	}
 	var command *exec.Cmd
 	if cfg.useSudo {
 		command = exec.Command("sudo", append([]string{"-n", cfg.VXLANBinary}, arguments...)...)
@@ -1374,7 +1379,11 @@ func startVXLAN(ctx context.Context, cfg JoinConfig, node *Node) (*VXLANHandle, 
 	}
 	log.Printf("started VXLAN child pid=%d podCIDR=%s bridgeCIDR=%s", command.Process.Pid, cidr, bridgeCIDR)
 	wait := make(chan error, 1)
-	go func() { wait <- command.Wait() }()
+	processDone := make(chan struct{})
+	go func() {
+		wait <- command.Wait()
+		close(processDone)
+	}()
 	cleanup := func() {
 		if command.Process == nil {
 			return
@@ -1390,10 +1399,16 @@ func startVXLAN(ctx context.Context, cfg JoinConfig, node *Node) (*VXLANHandle, 
 			}
 		}
 	}
-	bridgeName, bridgeMAC, err := waitForBridge(ctx, bridgeCIDR, 30*time.Second)
+	bridgeName, bridgeMAC, err := waitForBridge(ctx, bridgeCIDR, 30*time.Second, processDone)
 	if err != nil {
 		cleanup()
 		return nil, fmt.Errorf("discover darwin-vxlan bridge: %w", err)
+	}
+	select {
+	case <-processDone:
+		cleanup()
+		return nil, errors.New("darwin-vxlan exited after creating its bridge")
+	default:
 	}
 	log.Printf("VXLAN bridge discovered name=%s mac=%s address=%s", bridgeName, bridgeMAC, bridgeCIDR)
 	return &VXLANHandle{BridgeCIDR: bridgeCIDR, BridgeName: bridgeName, BridgeMAC: bridgeMAC, cleanup: cleanup}, nil
@@ -1410,13 +1425,48 @@ func signalProcessTree(pid int, useSudo bool, signal syscall.Signal) {
 	_ = syscall.Kill(pid, signal)
 }
 
-func waitForBridge(ctx context.Context, bridgeCIDR string, timeout time.Duration) (string, string, error) {
+func interfaceForAddress(addressCIDR string) (string, error) {
+	ip, _, err := net.ParseCIDR(addressCIDR)
+	if err != nil {
+		return "", fmt.Errorf("parse interface address %q: %w", addressCIDR, err)
+	}
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		return "", err
+	}
+	for _, iface := range interfaces {
+		addresses, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, address := range addresses {
+			var addressIP net.IP
+			switch value := address.(type) {
+			case *net.IPNet:
+				addressIP = value.IP
+			case *net.IPAddr:
+				addressIP = value.IP
+			}
+			if addressIP != nil && addressIP.Equal(ip) {
+				return iface.Name, nil
+			}
+		}
+	}
+	return "", nil
+}
+
+func waitForBridge(ctx context.Context, bridgeCIDR string, timeout time.Duration, processDone <-chan struct{}) (string, string, error) {
 	ip, _, err := net.ParseCIDR(bridgeCIDR)
 	if err != nil {
 		return "", "", fmt.Errorf("parse bridge address %q: %w", bridgeCIDR, err)
 	}
 	deadline := time.Now().Add(timeout)
 	for {
+		select {
+		case <-processDone:
+			return "", "", errors.New("darwin-vxlan exited before its bridge became ready")
+		default:
+		}
 		interfaces, listErr := net.Interfaces()
 		if listErr == nil {
 			for _, iface := range interfaces {
