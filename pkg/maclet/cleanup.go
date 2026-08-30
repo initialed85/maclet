@@ -1,4 +1,4 @@
-package main
+package maclet
 
 import (
 	"context"
@@ -40,7 +40,7 @@ func listAssignedPodsInNamespace(ctx context.Context, client *APIClient, nodeNam
 		"labelSelector": []string{nativeWorkloadLabelKey + "=" + nativeWorkloadLabelValue},
 	}
 	path := "/api/v1/namespaces/" + url.PathEscape(namespace) + "/pods?" + query.Encode()
-	body, err := client.get(ctx, path)
+	body, err := client.Get(ctx, path)
 	if err != nil {
 		return nil, err
 	}
@@ -57,28 +57,24 @@ func cleanupPodList(ctx context.Context, client *APIClient, pods []Pod, nodeName
 	for _, pod := range pods {
 		// Keep the label and node checks client-side as a defense-in-depth
 		// measure in addition to the API field/label selectors.
-		if pod.Spec.NodeName != nodeName || !podHasNativeLabel(pod) || pod.Metadata.DeletionTimestamp == "" {
+		if pod.Spec.NodeName != nodeName || !podHasNativeLabel(pod) || pod.ObjectMeta.DeletionTimestamp == nil {
 			continue
 		}
-		deletedAt, err := time.Parse(time.RFC3339Nano, pod.Metadata.DeletionTimestamp)
-		if err != nil {
-			cleanupErrors = append(cleanupErrors, fmt.Errorf("parse deletion timestamp for Pod %s/%s: %w", pod.Metadata.Namespace, pod.Metadata.Name, err))
-			continue
-		}
+		deletedAt := pod.ObjectMeta.DeletionTimestamp.Time
 		if staleAfter > 0 && now.Sub(deletedAt) < staleAfter {
 			continue
 		}
 		path := podPath(pod) + "?gracePeriodSeconds=0"
-		if _, err := client.delete(ctx, path); err != nil {
+		if _, err := client.Delete(ctx, path); err != nil {
 			var apiErr *HTTPError
 			if errors.As(err, &apiErr) && apiErr.Code == http.StatusNotFound {
 				continue
 			}
-			cleanupErrors = append(cleanupErrors, fmt.Errorf("force-delete native Pod %s/%s: %w", pod.Metadata.Namespace, pod.Metadata.Name, err))
+			cleanupErrors = append(cleanupErrors, fmt.Errorf("force-delete native Pod %s/%s: %w", pod.ObjectMeta.Namespace, pod.ObjectMeta.Name, err))
 			continue
 		}
 		removed++
-		log.Printf("force-deleted stale native Pod %s/%s assigned to %s", pod.Metadata.Namespace, pod.Metadata.Name, nodeName)
+		log.Printf("force-deleted stale native Pod %s/%s assigned to %s", pod.ObjectMeta.Namespace, pod.ObjectMeta.Name, nodeName)
 	}
 	return removed, errors.Join(cleanupErrors...)
 }
@@ -96,7 +92,7 @@ func cleanupTerminatingPodsClusterWide(ctx context.Context, client *APIClient, n
 		"fieldSelector": []string{"spec.nodeName=" + nodeName},
 		"labelSelector": []string{nativeWorkloadLabelKey + "=" + nativeWorkloadLabelValue},
 	}
-	body, err := client.get(ctx, "/api/v1/pods?"+query.Encode())
+	body, err := client.Get(ctx, "/api/v1/pods?"+query.Encode())
 	if err != nil {
 		return 0, fmt.Errorf("list native Pods for cluster-wide cleanup: %w", err)
 	}

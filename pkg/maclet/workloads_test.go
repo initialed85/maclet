@@ -1,4 +1,4 @@
-package main
+package maclet
 
 import (
 	"context"
@@ -10,7 +10,14 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	corev1 "k8s.io/api/core/v1"
 )
+
+func testHostPathVolume(name, path, volumeType string) Volume {
+	hostPathType := corev1.HostPathType(volumeType)
+	return Volume{Name: name, VolumeSource: corev1.VolumeSource{HostPath: &HostPathVolumeSource{Path: path, Type: &hostPathType}}}
+}
 
 func TestWorkloadJournalRoundTrip(t *testing.T) {
 	stateDir := t.TempDir()
@@ -69,12 +76,12 @@ func TestDarwinNetworkPeerGatewayReservation(t *testing.T) {
 }
 
 func TestWorkloadContainerName(t *testing.T) {
-	pod := Pod{Metadata: ObjectMeta{Namespace: "Demo_Namespace", Name: "hello.world", UID: "ABC-123"}}
+	pod := Pod{ObjectMeta: ObjectMeta{Namespace: "Demo_Namespace", Name: "hello.world", UID: "ABC-123"}}
 	name := workloadContainerName(pod)
 	if name != "maclet-demo_namespace-hello.world-abc-123" {
 		t.Fatalf("workloadContainerName() = %q", name)
 	}
-	long := Pod{Metadata: ObjectMeta{Namespace: "namespace", Name: "pod", UID: "012345678901234567890123456789012345678901234567890123456789012345678901234567890"}}
+	long := Pod{ObjectMeta: ObjectMeta{Namespace: "namespace", Name: "pod", UID: "012345678901234567890123456789012345678901234567890123456789012345678901234567890"}}
 	if got := workloadContainerName(long); len(got) > 120 || got == "" {
 		t.Fatalf("long workloadContainerName() = %q (len=%d)", got, len(got))
 	}
@@ -83,7 +90,7 @@ func TestWorkloadContainerName(t *testing.T) {
 func TestWorkloadRunArgs(t *testing.T) {
 	manager := newWorkloadManager(&DarwinNetworkHandle{Interface: "bridge101", PodCIDR: "10.42.8.0/24", Gateway: "10.42.8.2"}, "/usr/local/bin/macker", "192.168.137.111")
 	pod := Pod{
-		Metadata: ObjectMeta{
+		ObjectMeta: ObjectMeta{
 			Namespace: "default", Name: "web", UID: "uid-1",
 			Annotations: map[string]string{nativeDisablePortForwardAnnotation: "true"},
 		},
@@ -112,7 +119,7 @@ func TestWorkloadRunArgs(t *testing.T) {
 		t.Fatal("runArgs accepted unsupported hostPort")
 	}
 	pod.Spec.Containers[0].Ports[0].HostPort = 0
-	delete(pod.Metadata.Annotations, nativeDisablePortForwardAnnotation)
+	delete(pod.ObjectMeta.Annotations, nativeDisablePortForwardAnnotation)
 	args, err = manager.runArgs(pod, pod.Spec.Containers[0], managed)
 	if err != nil {
 		t.Fatal(err)
@@ -147,8 +154,8 @@ func TestMackerVolumeArgs(t *testing.T) {
 	}
 	pod := Pod{Spec: PodSpec{
 		Volumes: []Volume{
-			{Name: "content", HostPath: &HostPathVolumeSource{Path: content, Type: "Directory"}},
-			{Name: "config", HostPath: &HostPathVolumeSource{Path: config, Type: "File"}},
+			testHostPathVolume("content", content, "Directory"),
+			testHostPathVolume("config", config, "File"),
 		},
 	}}
 	container := ContainerSpec{VolumeMounts: []VolumeMount{
@@ -172,7 +179,7 @@ func TestMackerVolumeArgsRejectsUnsupportedMounts(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := mackerVolumeArgs(Pod{Spec: PodSpec{Volumes: []Volume{
-		{Name: "existing", HostPath: &HostPathVolumeSource{Path: existing, Type: "Directory"}},
+		testHostPathVolume("existing", existing, "Directory"),
 	}}}, ContainerSpec{VolumeMounts: []VolumeMount{{Name: "existing", MountPath: "/data", ReadOnly: true}}}); err == nil || !strings.Contains(err.Error(), "readOnly") {
 		t.Fatalf("readOnly mount error = %v, want readOnly rejection", err)
 	}
@@ -180,13 +187,13 @@ func TestMackerVolumeArgsRejectsUnsupportedMounts(t *testing.T) {
 		t.Fatalf("non-hostPath mount error = %v, want unsupported hostPath error", err)
 	}
 	if _, err := mackerVolumeArgs(Pod{Spec: PodSpec{Volumes: []Volume{
-		{Name: "existing", HostPath: &HostPathVolumeSource{Path: existing, Type: "Directory"}},
+		testHostPathVolume("existing", existing, "Directory"),
 	}}}, ContainerSpec{VolumeMounts: []VolumeMount{{Name: "existing", MountPath: "/data", SubPathExpr: "$(POD_NAME)"}}}); err == nil || !strings.Contains(err.Error(), "subPathExpr") {
 		t.Fatalf("subPathExpr mount error = %v, want subPathExpr rejection", err)
 	}
 	missing := filepath.Join(root, "created", "directory")
 	if _, err := mackerVolumeArgs(Pod{Spec: PodSpec{Volumes: []Volume{
-		{Name: "created", HostPath: &HostPathVolumeSource{Path: missing, Type: "DirectoryOrCreate"}},
+		testHostPathVolume("created", missing, "DirectoryOrCreate"),
 	}}}, ContainerSpec{VolumeMounts: []VolumeMount{{Name: "created", MountPath: "/data"}}}); err != nil {
 		t.Fatal(err)
 	}
@@ -211,7 +218,7 @@ func TestMackerVolumeArgsRejectsSubPathEscape(t *testing.T) {
 	if err := os.Symlink(outside, filepath.Join(volumeRoot, "escape")); err != nil {
 		t.Fatal(err)
 	}
-	pod := Pod{Spec: PodSpec{Volumes: []Volume{{Name: "volume", HostPath: &HostPathVolumeSource{Path: volumeRoot, Type: "Directory"}}}}}
+	pod := Pod{Spec: PodSpec{Volumes: []Volume{testHostPathVolume("volume", volumeRoot, "Directory")}}}
 	_, err := mackerVolumeArgs(pod, ContainerSpec{VolumeMounts: []VolumeMount{{Name: "volume", MountPath: "/data", SubPath: "escape/secret"}}})
 	if err == nil || !strings.Contains(err.Error(), "escapes") {
 		t.Fatalf("subPath escape error = %v", err)
@@ -219,7 +226,7 @@ func TestMackerVolumeArgsRejectsSubPathEscape(t *testing.T) {
 }
 
 func TestDesiredPodStatus(t *testing.T) {
-	pod := Pod{Metadata: ObjectMeta{Name: "web", Namespace: "default"}, Spec: PodSpec{Containers: []ContainerSpec{{Name: "web", Image: "example/web:latest"}}}, Status: PodStatus{Phase: "Pending", Conditions: []PodCondition{{Type: "PodScheduled", Status: "False"}}}}
+	pod := Pod{ObjectMeta: ObjectMeta{Name: "web", Namespace: "default"}, Spec: PodSpec{Containers: []ContainerSpec{{Name: "web", Image: "example/web:latest"}}}, Status: PodStatus{Phase: "Pending", Conditions: []PodCondition{{Type: "PodScheduled", Status: "False"}}}}
 	status := desiredPodStatus(pod, "192.168.137.111", "Running", "10.42.8.3", "MacletWorkloadRunning", "running", true, 2)
 	if status.Phase != "Running" || status.PodIP != "10.42.8.3" || status.HostIP != "192.168.137.111" {
 		t.Fatalf("status identity = %#v", status)
@@ -242,13 +249,13 @@ func TestDesiredPodStatusIncludesMackerExit(t *testing.T) {
 		ExitCode: &exitCode, StartedAt: &started, FinishedAt: &finished,
 		TerminationReason: "exited-with-error", TerminationSignal: "",
 	}
-	pod := Pod{Metadata: ObjectMeta{Name: "web", Namespace: "default"}, Spec: PodSpec{Containers: []ContainerSpec{{Name: "web", Image: "example/web:latest"}}}}
+	pod := Pod{ObjectMeta: ObjectMeta{Name: "web", Namespace: "default"}, Spec: PodSpec{Containers: []ContainerSpec{{Name: "web", Image: "example/web:latest"}}}}
 	status := desiredPodStatus(pod, "192.168.137.111", "Failed", "10.42.8.3", "MacletWorkloadFailed", "Macker workload exited with code 17", false, 0, inspection)
 	if len(status.ContainerStatuses) != 1 {
 		t.Fatalf("container statuses = %#v", status.ContainerStatuses)
 	}
 	terminated := status.ContainerStatuses[0].State.Terminated
-	if terminated == nil || terminated.ExitCode != 17 || terminated.StartedAt != started.Format(time.RFC3339Nano) || terminated.FinishedAt != finished.Format(time.RFC3339Nano) {
+	if terminated == nil || terminated.ExitCode != 17 || !terminated.StartedAt.Time.Equal(started) || !terminated.FinishedAt.Time.Equal(finished) {
 		t.Fatalf("terminated status = %#v", terminated)
 	}
 	if !strings.Contains(terminated.Message, "exited-with-error") {
@@ -275,14 +282,14 @@ func TestUpdatePodStatusPreservesMetadata(t *testing.T) {
 			t.Errorf("annotations = %#v", payload.Metadata.Annotations)
 		}
 		response.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(response).Encode(Pod{Metadata: payload.Metadata, Status: payload.Status})
+		_ = json.NewEncoder(response).Encode(Pod{ObjectMeta: payload.Metadata, Status: payload.Status})
 	}))
 	defer server.Close()
 	client, err := newAPIClient(server.URL, nil, "", "", true, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	pod := &Pod{Metadata: ObjectMeta{
+	pod := &Pod{ObjectMeta: ObjectMeta{
 		Name: "web", Namespace: "default", UID: "uid-1", ResourceVersion: "7",
 		Labels:      map[string]string{"k8s-darwin.dev/native": "true"},
 		Annotations: map[string]string{"example.test/owner": "maclet-test"},
@@ -292,7 +299,7 @@ func TestUpdatePodStatusPreservesMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if updated.Metadata.ResourceVersion != "7" || updated.Status.PodIP != "10.42.8.3" {
+	if updated.ObjectMeta.ResourceVersion != "7" || updated.Status.PodIP != "10.42.8.3" {
 		t.Fatalf("updated Pod = %#v", updated)
 	}
 }

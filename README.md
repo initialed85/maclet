@@ -38,8 +38,11 @@ go vet ./...
 go build -o maclet .
 ```
 
-The project uses only the Go standard library for its Kubernetes API and TLS
-surface. When automatic VXLAN peer discovery is enabled, maclet invokes the
+The root `main.go` is a small executable wrapper around the implementation in
+`pkg/maclet`; `pkg/kube` owns the narrow HTTPS transport and aliases the
+upstream Kubernetes API objects (`core/v1`, `coordination/v1`, and
+`metav1`). maclet still uses a deliberately small HTTP surface rather than
+client-go. When automatic VXLAN peer discovery is enabled, it invokes the
 locally installed `kubectl` only to load the selected kubeconfig as JSON; a
 static `--vxlan-gateway-mac` override avoids that helper dependency.
 

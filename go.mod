@@ -5,6 +5,7 @@ go 1.22
 require (
 	github.com/gorilla/websocket v1.5.3
 	github.com/rancher/remotedialer v0.4.1
+	k8s.io/api v0.27.1
 	k8s.io/apimachinery v0.27.1
 )
 

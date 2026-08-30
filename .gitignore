@@ -1,4 +1,4 @@
-maclet
+/maclet
 bin/
 *.test
 *.out

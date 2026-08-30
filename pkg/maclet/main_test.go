@@ -1,4 +1,4 @@
-package main
+package maclet
 
 import (
 	"context"
@@ -8,7 +8,19 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
+
+func testDeletionTimestamp(value string) *metav1.Time {
+	parsed, err := time.Parse(time.RFC3339Nano, value)
+	if err != nil {
+		panic(err)
+	}
+	stamp := metav1.NewTime(parsed)
+	return &stamp
+}
 
 func TestTokenPassword(t *testing.T) {
 	tests := []struct {
@@ -179,10 +191,10 @@ func TestDiscoverFlannelPeers(t *testing.T) {
 		}
 		_ = json.NewEncoder(response).Encode(NodeList{Items: []Node{
 			{
-				Metadata: ObjectMeta{Name: "maclet"},
+				ObjectMeta: ObjectMeta{Name: "maclet"},
 			},
 			{
-				Metadata: ObjectMeta{
+				ObjectMeta: ObjectMeta{
 					Name: "k3s-ocnus",
 					Annotations: map[string]string{
 						flannelBackendTypeAnnotation:   "vxlan",
@@ -194,7 +206,7 @@ func TestDiscoverFlannelPeers(t *testing.T) {
 				Spec: NodeSpec{PodCIDR: "10.42.0.0/24"},
 			},
 			{
-				Metadata: ObjectMeta{
+				ObjectMeta: ObjectMeta{
 					Name:        "ignored",
 					Annotations: map[string]string{flannelBackendTypeAnnotation: "host-gw"},
 				},
@@ -252,23 +264,23 @@ func TestNodeStatusIncludesExternalIP(t *testing.T) {
 	if status.Addresses[1].Type != "ExternalIP" || status.Addresses[1].Address != "192.168.137.111" {
 		t.Errorf("external address = %#v", status.Addresses[1])
 	}
-	if status.Capacity["pods"] != "110" || status.Allocatable["pods"] != "110" {
-		t.Errorf("pod capacity = %q/%q, want 110/110", status.Capacity["pods"], status.Allocatable["pods"])
+	podCapacity := status.Capacity[corev1.ResourcePods]
+	allocatablePods := status.Allocatable[corev1.ResourcePods]
+	if got, allocatable := podCapacity.Value(), allocatablePods.Value(); got != defaultMaxPods || allocatable != defaultMaxPods {
+		t.Errorf("pod capacity = %d/%d, want 110/110", got, allocatable)
 	}
-	endpoints, ok := status.DaemonEndpoints.(map[string]any)
-	endpoint, endpointOK := endpoints["kubeletEndpoint"].(map[string]any)
-	if !ok || !endpointOK || endpoint["Port"] != defaultKubeletPort {
-		t.Fatalf("daemon endpoints = %#v", status.DaemonEndpoints)
+	if got := status.DaemonEndpoints.KubeletEndpoint.Port; got != defaultKubeletPort {
+		t.Fatalf("kubelet endpoint port = %d, want %d", got, defaultKubeletPort)
 	}
 }
 
 func TestDesiredNode(t *testing.T) {
 	node := desiredNode("maclet", "192.168.137.111")
-	if node.Metadata.Labels["kubernetes.io/os"] != "darwin" {
-		t.Errorf("OS label = %q, want darwin", node.Metadata.Labels["kubernetes.io/os"])
+	if node.ObjectMeta.Labels["kubernetes.io/os"] != "darwin" {
+		t.Errorf("OS label = %q, want darwin", node.ObjectMeta.Labels["kubernetes.io/os"])
 	}
-	if node.Metadata.Labels["kubernetes.io/arch"] != "arm64" {
-		t.Errorf("arch label = %q, want darwin", node.Metadata.Labels["kubernetes.io/arch"])
+	if node.ObjectMeta.Labels["kubernetes.io/arch"] != "arm64" {
+		t.Errorf("arch label = %q, want darwin", node.ObjectMeta.Labels["kubernetes.io/arch"])
 	}
 	if !hasManagedTaint(node.Spec.Taints) {
 		t.Fatalf("Node taints = %#v, want managed NoSchedule taint", node.Spec.Taints)
@@ -304,26 +316,26 @@ func TestSetNodeShutdownCordon(t *testing.T) {
 		if cordoned {
 			annotations[shutdownCordonAnnotation] = "true"
 		}
-		_ = json.NewEncoder(response).Encode(Node{Metadata: ObjectMeta{Name: "maclet", Annotations: annotations}, Spec: NodeSpec{Unschedulable: cordoned}})
+		_ = json.NewEncoder(response).Encode(Node{ObjectMeta: ObjectMeta{Name: "maclet", Annotations: annotations}, Spec: NodeSpec{Unschedulable: cordoned}})
 	}))
 	defer server.Close()
 	client, err := newAPIClient(server.URL, nil, "", "", true, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	node := &Node{Metadata: ObjectMeta{Name: "maclet"}}
+	node := &Node{ObjectMeta: ObjectMeta{Name: "maclet"}}
 	node, err = setNodeShutdownCordon(context.Background(), client, node, true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !cordoned || !node.Spec.Unschedulable || node.Metadata.Annotations[shutdownCordonAnnotation] != "true" {
+	if !cordoned || !node.Spec.Unschedulable || node.ObjectMeta.Annotations[shutdownCordonAnnotation] != "true" {
 		t.Fatalf("cordoned node = %#v", node)
 	}
 	node, err = setNodeShutdownCordon(context.Background(), client, node, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cordoned || node.Spec.Unschedulable || node.Metadata.Annotations[shutdownCordonAnnotation] != "" {
+	if cordoned || node.Spec.Unschedulable || node.ObjectMeta.Annotations[shutdownCordonAnnotation] != "" {
 		t.Fatalf("uncordoned node = %#v", node)
 	}
 }
@@ -344,20 +356,20 @@ func TestCleanupTerminatingPods(t *testing.T) {
 			}
 			_ = json.NewEncoder(response).Encode(PodList{Items: []Pod{
 				{
-					Metadata: ObjectMeta{Namespace: "default", Name: "stale", UID: "uid-stale", Labels: map[string]string{nativeWorkloadLabelKey: nativeWorkloadLabelValue}, DeletionTimestamp: "2026-08-30T17:00:00Z"},
-					Spec:     PodSpec{NodeName: "maclet"},
+					ObjectMeta: ObjectMeta{Namespace: "default", Name: "stale", UID: "uid-stale", Labels: map[string]string{nativeWorkloadLabelKey: nativeWorkloadLabelValue}, DeletionTimestamp: testDeletionTimestamp("2026-08-30T17:00:00Z")},
+					Spec:       PodSpec{NodeName: "maclet"},
 				},
 				{
-					Metadata: ObjectMeta{Namespace: "default", Name: "fresh", UID: "uid-fresh", Labels: map[string]string{nativeWorkloadLabelKey: nativeWorkloadLabelValue}},
-					Spec:     PodSpec{NodeName: "maclet"},
+					ObjectMeta: ObjectMeta{Namespace: "default", Name: "fresh", UID: "uid-fresh", Labels: map[string]string{nativeWorkloadLabelKey: nativeWorkloadLabelValue}},
+					Spec:       PodSpec{NodeName: "maclet"},
 				},
 				{
-					Metadata: ObjectMeta{Namespace: "default", Name: "other-node", UID: "uid-other", Labels: map[string]string{nativeWorkloadLabelKey: nativeWorkloadLabelValue}, DeletionTimestamp: "2026-08-30T17:00:00Z"},
-					Spec:     PodSpec{NodeName: "other"},
+					ObjectMeta: ObjectMeta{Namespace: "default", Name: "other-node", UID: "uid-other", Labels: map[string]string{nativeWorkloadLabelKey: nativeWorkloadLabelValue}, DeletionTimestamp: testDeletionTimestamp("2026-08-30T17:00:00Z")},
+					Spec:       PodSpec{NodeName: "other"},
 				},
 				{
-					Metadata: ObjectMeta{Namespace: "default", Name: "unmanaged", UID: "uid-unmanaged", Labels: map[string]string{"example.test/owner": "someone-else"}, DeletionTimestamp: "2026-08-30T17:00:00Z"},
-					Spec:     PodSpec{NodeName: "maclet"},
+					ObjectMeta: ObjectMeta{Namespace: "default", Name: "unmanaged", UID: "uid-unmanaged", Labels: map[string]string{"example.test/owner": "someone-else"}, DeletionTimestamp: testDeletionTimestamp("2026-08-30T17:00:00Z")},
+					Spec:       PodSpec{NodeName: "maclet"},
 				},
 			}})
 		case http.MethodDelete:
@@ -396,8 +408,8 @@ func TestCleanupTerminatingPodsClusterWide(t *testing.T) {
 				t.Fatalf("list query = %s", request.URL.RawQuery)
 			}
 			_ = json.NewEncoder(response).Encode(PodList{Items: []Pod{{
-				Metadata: ObjectMeta{Namespace: "other", Name: "stale", UID: "uid-stale", Labels: map[string]string{nativeWorkloadLabelKey: nativeWorkloadLabelValue}, DeletionTimestamp: "2026-08-30T17:00:00Z"},
-				Spec:     PodSpec{NodeName: "maclet"},
+				ObjectMeta: ObjectMeta{Namespace: "other", Name: "stale", UID: "uid-stale", Labels: map[string]string{nativeWorkloadLabelKey: nativeWorkloadLabelValue}, DeletionTimestamp: testDeletionTimestamp("2026-08-30T17:00:00Z")},
+				Spec:       PodSpec{NodeName: "maclet"},
 			}}})
 		case http.MethodDelete:
 			if request.URL.Path != "/api/v1/namespaces/other/pods/stale" || request.URL.Query().Get("gracePeriodSeconds") != "0" {
@@ -434,9 +446,9 @@ func TestWorkloadSnapshot(t *testing.T) {
 		}
 		response.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(response).Encode(PodList{Items: []Pod{{
-			Metadata: ObjectMeta{Namespace: "default", Name: "hello", UID: "uid-1"},
-			Spec:     PodSpec{NodeName: "maclet", Containers: []ContainerSpec{{Name: "app", Image: "example/hello:latest"}}},
-			Status:   PodStatus{Phase: "Pending"},
+			ObjectMeta: ObjectMeta{Namespace: "default", Name: "hello", UID: "uid-1"},
+			Spec:       PodSpec{NodeName: "maclet", Containers: []ContainerSpec{{Name: "app", Image: "example/hello:latest"}}},
+			Status:     PodStatus{Phase: "Pending"},
 		}}})
 	}))
 	defer server.Close()
