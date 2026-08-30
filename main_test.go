@@ -76,6 +76,67 @@ func TestRouteSpec(t *testing.T) {
 	}
 }
 
+func TestWorkloadIPForOffset(t *testing.T) {
+	for _, test := range []struct {
+		cidr   string
+		offset uint32
+		want   string
+	}{
+		{cidr: "10.42.8.0/24", offset: 3, want: "10.42.8.3"},
+		{cidr: "10.42.8.0/24", offset: 254, want: "10.42.8.254"},
+		{cidr: "192.168.100.0/16", offset: 3, want: "192.168.0.3"},
+	} {
+		got, err := workloadIPForOffset(test.cidr, test.offset)
+		if err != nil {
+			t.Fatalf("workloadIPForOffset(%q, %d): %v", test.cidr, test.offset, err)
+		}
+		if got != test.want {
+			t.Errorf("workloadIPForOffset(%q, %d) = %q, want %q", test.cidr, test.offset, got, test.want)
+		}
+	}
+	for _, test := range []struct {
+		cidr   string
+		offset uint32
+	}{
+		{cidr: "10.42.8.0/24", offset: 0},
+		{cidr: "10.42.8.0/24", offset: 1},
+		{cidr: "10.42.8.0/24", offset: 2},
+		{cidr: "10.42.8.0/24", offset: 255},
+		{cidr: "10.42.8.0/31", offset: 3},
+		{cidr: "2001:db8::/64", offset: 3},
+	} {
+		if _, err := workloadIPForOffset(test.cidr, test.offset); err == nil {
+			t.Errorf("workloadIPForOffset(%q, %d) unexpectedly succeeded", test.cidr, test.offset)
+		}
+	}
+}
+
+func TestFirstAvailableWorkloadIP(t *testing.T) {
+	used := map[string]bool{"10.42.8.3": true, "10.42.8.4": true}
+	got, err := firstAvailableWorkloadIP("10.42.8.0/24", used)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "10.42.8.5" {
+		t.Fatalf("firstAvailableWorkloadIP() = %q, want 10.42.8.5", got)
+	}
+	used[got] = true
+	shortCIDRUsed := map[string]bool{}
+	got, err = firstAvailableWorkloadIP("10.42.8.0/29", shortCIDRUsed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "10.42.8.3" {
+		t.Fatalf("firstAvailableWorkloadIP(/29) = %q, want 10.42.8.3", got)
+	}
+	for _, ip := range []string{"10.42.8.3", "10.42.8.4", "10.42.8.5", "10.42.8.6"} {
+		shortCIDRUsed[ip] = true
+	}
+	if _, err := firstAvailableWorkloadIP("10.42.8.0/29", shortCIDRUsed); err == nil {
+		t.Fatal("firstAvailableWorkloadIP() found an address in an exhausted CIDR")
+	}
+}
+
 func TestBridgeAddressForCIDR(t *testing.T) {
 	tests := map[string]string{
 		"10.42.4.0/24":     "10.42.4.1/24",

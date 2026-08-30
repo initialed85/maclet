@@ -14,10 +14,13 @@ The first milestone is deliberately small:
 - optionally participate in the K3s Flannel VXLAN network;
 - publish the node's InternalIP, ExternalIP, and `macker://trusted-native`
   runtime identity;
+- run explicitly opted-in single-container Pods through Macker as trusted
+  native processes on direct PodCIDR address aliases;
 - print pods assigned to the node as JSON.
 
-This is **not** a secure container runtime. It does not run kubelet,
-containerd, CNI, or workloads yet. The node is intentionally tainted so the
+This is **not** a secure container runtime. It does not provide kubelet,
+containerd, Linux namespaces, or CNI isolation. Macker supervises supported
+Pods as ordinary host processes. The node is intentionally tainted so the
 scheduler will not place ordinary workloads on it:
 
 ```text
@@ -143,7 +146,9 @@ invoking user's `~/.maclet` in either case.
 ## Inspect scheduled workloads
 
 The `workloads` command uses the persisted client certificate to query pods
-whose `spec.nodeName` is this node and emits a small JSON snapshot:
+whose `spec.nodeName` is this node and emits a small JSON snapshot. When
+`join` is started with VXLAN enabled, maclet also reconciles explicitly opted-in
+Pods through Macker:
 
 ```sh
 ./maclet workloads
@@ -173,8 +178,26 @@ spec:
       effect: NoSchedule
 ```
 
-Such a pod will currently remain a desired workload for maclet to report; no
-runtime is implemented to execute it yet.
+Such a pod is eligible for the initial native runtime when `join` has VXLAN
+enabled and can find Macker. maclet currently supports one container per Pod,
+uses the PodCIDR's `.1` bridge address and `.2` synthetic gateway as reserved
+addresses, and allocates workload aliases from `.3` upward. It invokes:
+
+```text
+macker run --detach --net=external --interface <vxlan-bridge> --ip <pod-ip>
+  --host-interface <vxlan-bridge> --host-ip <bridge-ip> --name <generated-name>
+  [--env KEY=VALUE ...] [--entrypoint COMMAND] IMAGE [-- ARGS...]
+```
+
+Container ports become `MACKER_PORT_N` environment values for image
+configuration templates; they do not create host PF publications. The
+Kubernetes Pod status is updated with the allocated Pod IP, host IP, phase,
+conditions, and native container state. A terminating/deleted Pod stops and
+removes its Macker container and releases its address alias. The first runtime
+slice intentionally rejects multiple containers, non-service-account volume
+mounts, `valueFrom` environment entries, custom working directories, and
+`hostPort` mappings. Supply `--macker-binary` to `join` when Macker is not on
+`PATH`; image layouts must already be available in Macker's image store.
 
 ## VXLAN network handoff
 
@@ -223,17 +246,19 @@ Not implemented yet:
 - multi-peer VXLAN fan-out and failover;
 - automatic cleanup after an unclean process kill;
 - a native Darwin CNI implementation;
-- kubelet-compatible Pod lifecycle or container execution;
+- full kubelet-compatible Pod lifecycle semantics, including sidecars,
+  volume projection, image pulling, and exit-code reporting;
 - `/etc/hosts`/cluster DNS synchronization;
-- service proxying, port publishing, or network policy;
+- service proxying, Pod host-port mapping, or network policy;
 - workload event/watch output.
 
 The current network manager consumes the Node's assigned PodCIDR, coordinates
-single-peer Darwin VXLAN and host routes, and watches for explicitly opted-in
-pods. The reported container runtime is `macker://trusted-native`, reflecting
-that future workloads are expected to be supervised by Macker rather than a
-Linux container runtime. `/etc/hosts` and native workload execution can then be
-added without pretending that macOS provides Linux container isolation.
+single-peer Darwin VXLAN and host routes, allocates direct IP aliases, and
+reconciles explicitly opted-in Pods through Macker. The reported container
+runtime is `macker://trusted-native`, reflecting that workloads are supervised
+by Macker rather than a Linux container runtime. `/etc/hosts` and richer native
+workload behavior can then be added without pretending that macOS provides
+Linux container isolation.
 
 ## Removing the experiment node
 

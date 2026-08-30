@@ -444,12 +444,13 @@ func loadPeerAPIClient(server, kubeconfigPath, contextName string, insecure bool
 
 // Kubernetes object fragments used by the registration and workload paths.
 type ObjectMeta struct {
-	Name            string            `json:"name,omitempty"`
-	Namespace       string            `json:"namespace,omitempty"`
-	UID             string            `json:"uid,omitempty"`
-	ResourceVersion string            `json:"resourceVersion,omitempty"`
-	Labels          map[string]string `json:"labels,omitempty"`
-	Annotations     map[string]string `json:"annotations,omitempty"`
+	Name              string            `json:"name,omitempty"`
+	Namespace         string            `json:"namespace,omitempty"`
+	UID               string            `json:"uid,omitempty"`
+	ResourceVersion   string            `json:"resourceVersion,omitempty"`
+	DeletionTimestamp string            `json:"deletionTimestamp,omitempty"`
+	Labels            map[string]string `json:"labels,omitempty"`
+	Annotations       map[string]string `json:"annotations,omitempty"`
 }
 
 type Taint struct {
@@ -538,21 +539,102 @@ type Pod struct {
 
 type PodSpec struct {
 	NodeName       string          `json:"nodeName,omitempty"`
+	RestartPolicy  string          `json:"restartPolicy,omitempty"`
 	Containers     []ContainerSpec `json:"containers,omitempty"`
 	InitContainers []ContainerSpec `json:"initContainers,omitempty"`
 }
 
 type ContainerSpec struct {
-	Name    string   `json:"name"`
-	Image   string   `json:"image,omitempty"`
-	Command []string `json:"command,omitempty"`
-	Args    []string `json:"args,omitempty"`
+	Name         string          `json:"name"`
+	Image        string          `json:"image,omitempty"`
+	Command      []string        `json:"command,omitempty"`
+	Args         []string        `json:"args,omitempty"`
+	WorkingDir   string          `json:"workingDir,omitempty"`
+	Env          []EnvVar        `json:"env,omitempty"`
+	Ports        []ContainerPort `json:"ports,omitempty"`
+	VolumeMounts []VolumeMount   `json:"volumeMounts,omitempty"`
+}
+
+type ContainerPort struct {
+	Name          string `json:"name,omitempty"`
+	HostPort      int32  `json:"hostPort,omitempty"`
+	ContainerPort int32  `json:"containerPort"`
+	Protocol      string `json:"protocol,omitempty"`
+}
+
+type EnvVar struct {
+	Name      string        `json:"name"`
+	Value     string        `json:"value,omitempty"`
+	ValueFrom *EnvVarSource `json:"valueFrom,omitempty"`
+}
+
+type EnvVarSource struct {
+	FieldRef *ObjectFieldSelector `json:"fieldRef,omitempty"`
+}
+
+type ObjectFieldSelector struct {
+	FieldPath string `json:"fieldPath,omitempty"`
+}
+
+type VolumeMount struct {
+	Name      string `json:"name,omitempty"`
+	MountPath string `json:"mountPath,omitempty"`
+}
+
+type PodIP struct {
+	IP string `json:"ip"`
+}
+
+type PodCondition struct {
+	Type               string `json:"type"`
+	Status             string `json:"status"`
+	LastProbeTime      string `json:"lastProbeTime,omitempty"`
+	LastTransitionTime string `json:"lastTransitionTime,omitempty"`
+	Reason             string `json:"reason,omitempty"`
+	Message            string `json:"message,omitempty"`
+}
+
+type ContainerState struct {
+	Waiting    *ContainerStateWaiting    `json:"waiting,omitempty"`
+	Running    *ContainerStateRunning    `json:"running,omitempty"`
+	Terminated *ContainerStateTerminated `json:"terminated,omitempty"`
+}
+
+type ContainerStateWaiting struct {
+	Reason  string `json:"reason,omitempty"`
+	Message string `json:"message,omitempty"`
+}
+
+type ContainerStateRunning struct {
+	StartedAt string `json:"startedAt,omitempty"`
+}
+
+type ContainerStateTerminated struct {
+	ExitCode   int32  `json:"exitCode"`
+	Reason     string `json:"reason,omitempty"`
+	Message    string `json:"message,omitempty"`
+	StartedAt  string `json:"startedAt,omitempty"`
+	FinishedAt string `json:"finishedAt,omitempty"`
+}
+
+type ContainerStatus struct {
+	Name         string         `json:"name"`
+	State        ContainerState `json:"state"`
+	Ready        bool           `json:"ready"`
+	RestartCount int32          `json:"restartCount"`
+	Image        string         `json:"image,omitempty"`
 }
 
 type PodStatus struct {
-	Phase  string `json:"phase,omitempty"`
-	PodIP  string `json:"podIP,omitempty"`
-	HostIP string `json:"hostIP,omitempty"`
+	Phase                 string            `json:"phase,omitempty"`
+	Conditions            []PodCondition    `json:"conditions,omitempty"`
+	PodIP                 string            `json:"podIP,omitempty"`
+	PodIPs                []PodIP           `json:"podIPs,omitempty"`
+	HostIP                string            `json:"hostIP,omitempty"`
+	ContainerStatuses     []ContainerStatus `json:"containerStatuses,omitempty"`
+	InitContainerStatuses []ContainerStatus `json:"initContainerStatuses,omitempty"`
+	Reason                string            `json:"reason,omitempty"`
+	Message               string            `json:"message,omitempty"`
 }
 
 type LocalState struct {
@@ -580,6 +662,7 @@ type JoinConfig struct {
 	InsecureSkipTLSVerify bool
 	Once                  bool
 	VXLANBinary           string
+	MackerBinary          string
 	VXLANRemote           string
 	VXLANLocal            string
 	VXLANGatewayMAC       string
@@ -607,10 +690,12 @@ type DarwinRoute struct {
 
 type DarwinNetworkHandle struct {
 	Interface  string
+	PodCIDR    string
 	Gateway    string
 	GatewayMAC string
 	ARPAdded   bool
 	Routes     []DarwinRoute
+	Aliases    []string
 	useSudo    bool
 }
 
@@ -1537,6 +1622,62 @@ func routeSpec(cidr string) (DarwinRoute, error) {
 	return DarwinRoute{Network: ip4.String(), Netmask: maskIP}, nil
 }
 
+func workloadIPForOffset(cidr string, offset uint32) (string, error) {
+	_, network, err := net.ParseCIDR(cidr)
+	if err != nil {
+		return "", fmt.Errorf("parse PodCIDR %q: %w", cidr, err)
+	}
+	ip4 := network.IP.To4()
+	if ip4 == nil {
+		return "", errors.New("only IPv4 PodCIDRs are currently supported")
+	}
+	prefix, bits := network.Mask.Size()
+	if bits != 32 {
+		return "", errors.New("only IPv4 PodCIDRs are currently supported")
+	}
+	hostBits := bits - prefix
+	if hostBits < 2 || hostBits > 16 {
+		return "", fmt.Errorf("PodCIDR %q is outside the supported workload address range", cidr)
+	}
+	broadcastOffset := uint32(1<<hostBits) - 1
+	// Offset 0 is the network address, offsets 1 and 2 are reserved for the
+	// maclet bridge and synthetic Flannel gateway, and the final offset is the
+	// broadcast address.
+	if offset < 3 || offset >= broadcastOffset {
+		return "", fmt.Errorf("workload address offset %d is unavailable in PodCIDR %q", offset, cidr)
+	}
+	value := binary.BigEndian.Uint32(ip4) + offset
+	workloadIP := make(net.IP, net.IPv4len)
+	binary.BigEndian.PutUint32(workloadIP, value)
+	return workloadIP.String(), nil
+}
+
+func firstAvailableWorkloadIP(cidr string, used map[string]bool) (string, error) {
+	_, network, err := net.ParseCIDR(cidr)
+	if err != nil {
+		return "", fmt.Errorf("parse PodCIDR %q: %w", cidr, err)
+	}
+	prefix, bits := network.Mask.Size()
+	if bits != 32 {
+		return "", errors.New("only IPv4 PodCIDRs are currently supported")
+	}
+	hostBits := bits - prefix
+	if hostBits < 2 || hostBits > 16 {
+		return "", fmt.Errorf("PodCIDR %q is outside the supported workload address range", cidr)
+	}
+	broadcastOffset := uint32(1<<hostBits) - 1
+	for offset := uint32(3); offset < broadcastOffset; offset++ {
+		ip, err := workloadIPForOffset(cidr, offset)
+		if err != nil {
+			return "", err
+		}
+		if !used[ip] {
+			return ip, nil
+		}
+	}
+	return "", fmt.Errorf("PodCIDR %q has no available workload addresses", cidr)
+}
+
 func setupDarwinNetwork(cfg JoinConfig, vxlan *VXLANHandle, gatewayMAC string) (*DarwinNetworkHandle, error) {
 	gateway, err := gatewayAddressForCIDR(vxlan.BridgeCIDR)
 	if err != nil {
@@ -1555,7 +1696,13 @@ func setupDarwinNetwork(cfg JoinConfig, vxlan *VXLANHandle, gatewayMAC string) (
 		route.Gateway = gateway
 		routes = append(routes, route)
 	}
-	handle := &DarwinNetworkHandle{Interface: vxlan.BridgeName, Gateway: gateway, GatewayMAC: mac.String(), useSudo: cfg.useSudo}
+	handle := &DarwinNetworkHandle{
+		Interface:  vxlan.BridgeName,
+		PodCIDR:    vxlan.BridgeCIDR,
+		Gateway:    gateway,
+		GatewayMAC: mac.String(),
+		useSudo:    cfg.useSudo,
+	}
 	arpCommand := privilegedCommand(cfg.useSudo, "arp", "-S", gateway, mac.String(), "ifscope", vxlan.BridgeName)
 	if output, err := arpCommand.CombinedOutput(); err != nil {
 		return nil, fmt.Errorf("install Darwin ARP gateway %s on %s: %w (%s)", gateway, vxlan.BridgeName, err, strings.TrimSpace(string(output)))
@@ -1573,6 +1720,73 @@ func setupDarwinNetwork(cfg JoinConfig, vxlan *VXLANHandle, gatewayMAC string) (
 		handle.Routes = append(handle.Routes, route)
 	}
 	return handle, nil
+}
+
+func (h *DarwinNetworkHandle) addWorkloadIP(ip string) error {
+	parsed := net.ParseIP(ip)
+	if parsed == nil || parsed.To4() == nil {
+		return fmt.Errorf("workload address %q is not an IPv4 address", ip)
+	}
+	parsed = parsed.To4()
+	_, network, err := net.ParseCIDR(h.PodCIDR)
+	if err != nil {
+		return fmt.Errorf("parse PodCIDR %q: %w", h.PodCIDR, err)
+	}
+	if !network.Contains(parsed) {
+		return fmt.Errorf("workload address %s is outside PodCIDR %s", ip, h.PodCIDR)
+	}
+	gatewayIP := net.ParseIP(h.Gateway)
+	bridgeIP, _ := bridgeAddressForCIDR(h.PodCIDR)
+	bridgeAddress := net.ParseIP(strings.Split(bridgeIP, "/")[0])
+	if parsed.Equal(gatewayIP) || parsed.Equal(bridgeAddress) || parsed.Equal(network.IP) {
+		return fmt.Errorf("workload address %s is reserved by maclet", ip)
+	}
+	prefix, bits := network.Mask.Size()
+	if bits != 32 || prefix > 30 {
+		return fmt.Errorf("PodCIDR %q does not have usable workload addresses", h.PodCIDR)
+	}
+	hostBits := bits - prefix
+	broadcast := binary.BigEndian.Uint32(network.IP.To4()) + uint32(1<<hostBits) - 1
+	if binary.BigEndian.Uint32(parsed) == broadcast {
+		return fmt.Errorf("workload address %s is the PodCIDR broadcast address", ip)
+	}
+	canonicalIP := parsed.String()
+	for _, existing := range h.Aliases {
+		if existing == canonicalIP {
+			return nil
+		}
+	}
+	command := privilegedCommand(h.useSudo, "ifconfig", h.Interface, "inet", canonicalIP, "netmask", "255.255.255.255", "alias")
+	if output, err := command.CombinedOutput(); err != nil {
+		return fmt.Errorf("add workload address %s to %s: %w (%s)", canonicalIP, h.Interface, err, strings.TrimSpace(string(output)))
+	}
+	h.Aliases = append(h.Aliases, canonicalIP)
+	return nil
+}
+
+func (h *DarwinNetworkHandle) removeWorkloadIP(ip string) error {
+	canonicalIP := net.ParseIP(ip)
+	if canonicalIP == nil || canonicalIP.To4() == nil {
+		return fmt.Errorf("workload address %q is not an IPv4 address", ip)
+	}
+	canonicalIP = canonicalIP.To4()
+	address := canonicalIP.String()
+	index := -1
+	for i, existing := range h.Aliases {
+		if existing == address {
+			index = i
+			break
+		}
+	}
+	if index == -1 {
+		return nil
+	}
+	command := privilegedCommand(h.useSudo, "ifconfig", h.Interface, "inet", address, "-alias")
+	if output, err := command.CombinedOutput(); err != nil {
+		return fmt.Errorf("remove workload address %s from %s: %w (%s)", address, h.Interface, err, strings.TrimSpace(string(output)))
+	}
+	h.Aliases = append(h.Aliases[:index], h.Aliases[index+1:]...)
+	return nil
 }
 
 func (h *DarwinNetworkHandle) setGatewayMAC(mac string) error {
@@ -1594,6 +1808,11 @@ func (h *DarwinNetworkHandle) setGatewayMAC(mac string) error {
 
 func (h *DarwinNetworkHandle) cleanup() error {
 	var cleanupErrors []error
+	for i := len(h.Aliases) - 1; i >= 0; i-- {
+		if err := h.removeWorkloadIP(h.Aliases[i]); err != nil {
+			cleanupErrors = append(cleanupErrors, err)
+		}
+	}
 	for i := len(h.Routes) - 1; i >= 0; i-- {
 		route := h.Routes[i]
 		command := privilegedCommand(h.useSudo, "route", "-n", "delete", "-net", route.Network, "-netmask", route.Netmask, route.Gateway)
@@ -1688,6 +1907,7 @@ func runJoin(cfg JoinConfig) error {
 		return err
 	}
 	var darwinNetwork *DarwinNetworkHandle
+	var workloads *workloadManager
 	if vxlan != nil {
 		if gatewayMAC == "" {
 			gatewayMAC, err = remoteVtepMAC(ctx, client, cfg.VXLANRemote, cfg.VXLANGatewayMAC)
@@ -1710,9 +1930,15 @@ func runJoin(cfg JoinConfig) error {
 			return err
 		}
 		log.Printf("published Flannel VXLAN metadata for %s: publicIP=%s vtepMAC=%s gatewayMAC=%s", state.NodeName, vxlanPublicIP(cfg, state), vxlan.BridgeMAC, gatewayMAC)
+		workloads = newWorkloadManager(darwinNetwork, cfg.MackerBinary, state.NodeIP)
 		defer func() {
 			cleanupContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
+			if workloads != nil {
+				if err := workloads.cleanup(); err != nil {
+					log.Printf("warning: clean native workloads: %v", err)
+				}
+			}
 			if err := clearFlannel(cleanupContext, client, state.NodeName); err != nil {
 				log.Printf("warning: clear Flannel annotations: %v", err)
 			}
@@ -1728,6 +1954,13 @@ func runJoin(cfg JoinConfig) error {
 	}
 	if err := ensureLease(ctx, client, state.NodeName); err != nil {
 		return err
+	}
+	if !cfg.Once && workloads != nil {
+		if pods, listErr := listAssignedPods(ctx, client, state.NodeName); listErr != nil {
+			log.Printf("warning: list assigned workloads: %v", listErr)
+		} else if reconcileErr := workloads.reconcile(ctx, client, pods); reconcileErr != nil {
+			log.Printf("warning: reconcile native workloads: %v", reconcileErr)
+		}
 	}
 
 	if cfg.Once {
@@ -1761,6 +1994,13 @@ func runJoin(cfg JoinConfig) error {
 			}
 			if err := ensureLease(ctx, client, state.NodeName); err != nil {
 				return err
+			}
+			if workloads != nil {
+				if pods, listErr := listAssignedPods(ctx, client, state.NodeName); listErr != nil {
+					log.Printf("warning: list assigned workloads: %v", listErr)
+				} else if reconcileErr := workloads.reconcile(ctx, client, pods); reconcileErr != nil {
+					log.Printf("warning: reconcile native workloads: %v", reconcileErr)
+				}
 			}
 		}
 	}
@@ -1863,6 +2103,7 @@ func runJoinCommand(args []string) error {
 	flags.BoolVar(&cfg.InsecureSkipTLSVerify, "insecure-skip-tls-verify", false, "disable TLS verification (development only)")
 	flags.BoolVar(&cfg.Once, "once", false, "register, heartbeat once, and exit")
 	flags.StringVar(&cfg.VXLANBinary, "vxlan-binary", "", "path to darwin-vxlan; start it after PodCIDR assignment")
+	flags.StringVar(&cfg.MackerBinary, "macker-binary", "", "path to Macker; start assigned native Pods through it (defaults to PATH)")
 	flags.StringVar(&cfg.VXLANRemote, "vxlan-remote", "", "VXLAN remote underlay address")
 	flags.StringVar(&cfg.VXLANLocal, "vxlan-local", "", "VXLAN local underlay address (defaults to --node-ip)")
 	flags.StringVar(&cfg.VXLANGatewayMAC, "vxlan-gateway-mac", "", "static remote flannel.1 MAC override (normally discovered through --peer-kubeconfig)")
