@@ -218,6 +218,10 @@ func (c *APIClient) patchJSON(ctx context.Context, path string, value any) ([]by
 	return c.do(ctx, http.MethodPatch, path, body, "application/merge-patch+json", nil)
 }
 
+func (c *APIClient) delete(ctx context.Context, path string) ([]byte, error) {
+	return c.do(ctx, http.MethodDelete, path, nil, "", nil)
+}
+
 type kubeconfigJSON struct {
 	CurrentContext string `json:"current-context"`
 	Clusters       []struct {
@@ -312,6 +316,27 @@ func kubeconfigFile(baseDir, path string) ([]byte, error) {
 		return nil, fmt.Errorf("read kubeconfig file %s: %w", path, err)
 	}
 	return body, nil
+}
+
+func inClusterAPIClient() (*APIClient, error) {
+	host := os.Getenv("KUBERNETES_SERVICE_HOST")
+	port := os.Getenv("KUBERNETES_SERVICE_PORT")
+	if host == "" || port == "" {
+		return nil, errors.New("Kubernetes in-cluster environment is unavailable")
+	}
+	caPEM, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/ca.crt")
+	if err != nil {
+		return nil, fmt.Errorf("read in-cluster CA: %w", err)
+	}
+	token, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/token")
+	if err != nil {
+		return nil, fmt.Errorf("read in-cluster token: %w", err)
+	}
+	client, err := newAPIClientWithMaterial("https://"+net.JoinHostPort(host, port), caPEM, nil, nil, false, "", "", strings.TrimSpace(string(token)))
+	if err != nil {
+		return nil, fmt.Errorf("create in-cluster API client: %w", err)
+	}
+	return client, nil
 }
 
 func loadPeerAPIClient(server, kubeconfigPath, contextName string, insecure bool) (*APIClient, bool, error) {
@@ -2455,8 +2480,9 @@ func usage() {
 	fmt.Fprintf(os.Stderr, `maclet %s
 
 Usage:
-  maclet join [options]       register/heartbeat a Darwin node
-  maclet workloads [options]  print pods scheduled to this node as JSON
+  maclet join [options]                 register/heartbeat a Darwin node
+  maclet workloads [options]            print pods scheduled to this node as JSON
+  maclet cleanup-controller [options]   remove stale native Pods with explicit cleanup RBAC
   maclet version
 
 Run "maclet join --help" or "maclet workloads --help" for command options.
@@ -2522,6 +2548,8 @@ func main() {
 		err = runJoinCommand(os.Args[2:])
 	case "workloads":
 		err = runWorkloadsCommand(os.Args[2:])
+	case "cleanup-controller":
+		err = cleanupControllerCommand(os.Args[2:])
 	case "version":
 		fmt.Println(version)
 	case "help", "--help", "-h":

@@ -313,6 +313,48 @@ func TestSetNodeShutdownCordon(t *testing.T) {
 	}
 }
 
+func TestCleanupTerminatingPods(t *testing.T) {
+	deleted := false
+	server := httptest.NewTLSServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		switch request.Method {
+		case http.MethodGet:
+			if request.URL.Path != "/api/v1/namespaces/default/pods" {
+				t.Fatalf("list request path = %s", request.URL.Path)
+			}
+			if got := request.URL.Query().Get("fieldSelector"); got != "spec.nodeName=maclet" {
+				t.Errorf("fieldSelector = %q", got)
+			}
+			if got := request.URL.Query().Get("labelSelector"); got != nativeWorkloadLabelKey+"="+nativeWorkloadLabelValue {
+				t.Errorf("labelSelector = %q", got)
+			}
+			_ = json.NewEncoder(response).Encode(PodList{Items: []Pod{{
+				Metadata: ObjectMeta{Namespace: "default", Name: "stale", UID: "uid-stale", Labels: map[string]string{nativeWorkloadLabelKey: nativeWorkloadLabelValue}, DeletionTimestamp: "2026-08-30T17:00:00Z"},
+				Spec:     PodSpec{NodeName: "maclet"},
+			}}})
+		case http.MethodDelete:
+			if request.URL.Path != "/api/v1/namespaces/default/pods/stale" || request.URL.Query().Get("gracePeriodSeconds") != "0" {
+				t.Fatalf("delete request = %s?%s", request.URL.Path, request.URL.RawQuery)
+			}
+			deleted = true
+			response.WriteHeader(http.StatusOK)
+		default:
+			http.NotFound(response, request)
+		}
+	}))
+	defer server.Close()
+	client, err := newAPIClient(server.URL, nil, "", "", true, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	removed, err := cleanupTerminatingPods(context.Background(), client, "maclet", "default", time.Minute, time.Date(2026, 8, 30, 18, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed != 1 || !deleted {
+		t.Fatalf("cleanup result = removed %d, deleted %v", removed, deleted)
+	}
+}
+
 func TestWorkloadSnapshot(t *testing.T) {
 	server := httptest.NewTLSServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		if request.URL.Path != "/api/v1/pods" {
