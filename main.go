@@ -542,8 +542,19 @@ type Pod struct {
 type PodSpec struct {
 	NodeName       string          `json:"nodeName,omitempty"`
 	RestartPolicy  string          `json:"restartPolicy,omitempty"`
+	Volumes        []Volume        `json:"volumes,omitempty"`
 	Containers     []ContainerSpec `json:"containers,omitempty"`
 	InitContainers []ContainerSpec `json:"initContainers,omitempty"`
+}
+
+type Volume struct {
+	Name     string                `json:"name,omitempty"`
+	HostPath *HostPathVolumeSource `json:"hostPath,omitempty"`
+}
+
+type HostPathVolumeSource struct {
+	Path string `json:"path,omitempty"`
+	Type string `json:"type,omitempty"`
 }
 
 type ContainerSpec struct {
@@ -581,6 +592,8 @@ type ObjectFieldSelector struct {
 type VolumeMount struct {
 	Name      string `json:"name,omitempty"`
 	MountPath string `json:"mountPath,omitempty"`
+	SubPath   string `json:"subPath,omitempty"`
+	ReadOnly  bool   `json:"readOnly,omitempty"`
 }
 
 type PodIP struct {

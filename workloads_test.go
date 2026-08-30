@@ -5,6 +5,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -72,6 +75,88 @@ func TestWorkloadRunArgs(t *testing.T) {
 	pod.Spec.Containers[0].Ports[0].HostPort = 8080
 	if _, err := manager.runArgs(pod, pod.Spec.Containers[0], managed); err == nil {
 		t.Fatal("runArgs accepted unsupported hostPort")
+	}
+}
+
+func TestMackerVolumeArgs(t *testing.T) {
+	root := t.TempDir()
+	content := filepath.Join(root, "content")
+	if err := os.Mkdir(content, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	index := filepath.Join(content, "index.html")
+	if err := os.WriteFile(index, []byte("hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	config := filepath.Join(root, "config.txt")
+	if err := os.WriteFile(config, []byte("config"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pod := Pod{Spec: PodSpec{
+		Volumes: []Volume{
+			{Name: "content", HostPath: &HostPathVolumeSource{Path: content, Type: "Directory"}},
+			{Name: "config", HostPath: &HostPathVolumeSource{Path: config, Type: "File"}},
+		},
+	}}
+	container := ContainerSpec{VolumeMounts: []VolumeMount{
+		{Name: "content", MountPath: "/usr/share/nginx/html", SubPath: "index.html"},
+		{Name: "config", MountPath: "/etc/example/config.txt"},
+	}}
+	args, err := mackerVolumeArgs(pod, container)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"-v", index + ":/usr/share/nginx/html", "-v", config + ":/etc/example/config.txt"}
+	if strings.Join(args, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("mackerVolumeArgs() = %#v, want %#v", args, want)
+	}
+}
+
+func TestMackerVolumeArgsRejectsUnsupportedMounts(t *testing.T) {
+	root := t.TempDir()
+	existing := filepath.Join(root, "existing")
+	if err := os.Mkdir(existing, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mackerVolumeArgs(Pod{Spec: PodSpec{Volumes: []Volume{
+		{Name: "existing", HostPath: &HostPathVolumeSource{Path: existing, Type: "Directory"}},
+	}}}, ContainerSpec{VolumeMounts: []VolumeMount{{Name: "existing", MountPath: "/data", ReadOnly: true}}}); err == nil || !strings.Contains(err.Error(), "readOnly") {
+		t.Fatalf("readOnly mount error = %v, want readOnly rejection", err)
+	}
+	if _, err := mackerVolumeArgs(Pod{Spec: PodSpec{Volumes: []Volume{{Name: "projected"}}}}, ContainerSpec{VolumeMounts: []VolumeMount{{Name: "projected", MountPath: "/data"}}}); err == nil || !strings.Contains(err.Error(), "supported hostPath") {
+		t.Fatalf("non-hostPath mount error = %v, want unsupported hostPath error", err)
+	}
+	missing := filepath.Join(root, "created", "directory")
+	if _, err := mackerVolumeArgs(Pod{Spec: PodSpec{Volumes: []Volume{
+		{Name: "created", HostPath: &HostPathVolumeSource{Path: missing, Type: "DirectoryOrCreate"}},
+	}}}, ContainerSpec{VolumeMounts: []VolumeMount{{Name: "created", MountPath: "/data"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Stat(missing); err != nil || !info.IsDir() {
+		t.Fatalf("DirectoryOrCreate path = %v, info = %#v", err, info)
+	}
+}
+
+func TestMackerVolumeArgsRejectsSubPathEscape(t *testing.T) {
+	root := t.TempDir()
+	volumeRoot := filepath.Join(root, "volume")
+	outside := filepath.Join(root, "outside")
+	if err := os.Mkdir(volumeRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(outside, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(outside, "secret"), []byte("secret"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(volumeRoot, "escape")); err != nil {
+		t.Fatal(err)
+	}
+	pod := Pod{Spec: PodSpec{Volumes: []Volume{{Name: "volume", HostPath: &HostPathVolumeSource{Path: volumeRoot, Type: "Directory"}}}}}
+	_, err := mackerVolumeArgs(pod, ContainerSpec{VolumeMounts: []VolumeMount{{Name: "volume", MountPath: "/data", SubPath: "escape/secret"}}})
+	if err == nil || !strings.Contains(err.Error(), "escapes") {
+		t.Fatalf("subPath escape error = %v", err)
 	}
 }
 
