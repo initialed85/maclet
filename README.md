@@ -165,20 +165,104 @@ Example when no pod has been explicitly assigned:
 ```
 
 The NoSchedule taint means a workload must explicitly tolerate the Darwin
-runtime and select the node. A future test manifest will look like:
+runtime and select the node. The repository includes a complete Deployment,
+Service, and Traefik Ingress example at
+[`examples/nginx-native.yaml`](examples/nginx-native.yaml):
 
 ```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx-native
+  labels:
+    app: nginx-native
 spec:
-  nodeSelector:
-    k8s-darwin.dev/native: "true"
-  tolerations:
-    - key: k8s-darwin.dev/native
-      operator: Equal
-      value: "true"
-      effect: NoSchedule
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nginx-native
+  template:
+    metadata:
+      labels:
+        app: nginx-native
+        k8s-darwin.dev/native: "true"
+    spec:
+      nodeSelector:
+        k8s-darwin.dev/native: "true"
+      tolerations:
+        - key: k8s-darwin.dev/native
+          operator: Equal
+          value: "true"
+          effect: NoSchedule
+      containers:
+        - name: nginx
+          image: docker.io/initialed85/nginx:latest
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nginx-native
+  labels:
+    app: nginx-native
+spec:
+  selector:
+    app: nginx-native
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: nginx-native
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: nginx.dev.initialed85.cc
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: nginx-native
+                port:
+                  name: http
+  tls:
+    - hosts:
+        - nginx.dev.initialed85.cc
+      secretName: nginx-dev-initialed85-cc
 ```
 
-Such a pod is eligible for the initial native runtime when `join` has VXLAN
+Start maclet with VXLAN and Macker, make sure the Darwin image is already in
+Macker's local image store (Macker does not pull images during reconciliation),
+and then apply the manifest:
+
+```sh
+macker pull docker.io/initialed85/nginx:latest
+./maclet join \
+  --server https://192.168.1.111:6443 \
+  --node-name maclet \
+  --node-ip 192.168.137.111 \
+  --vxlan-binary ../darwin-vxlan/target/release/darwin-vxlan \
+  --vxlan-remote 192.168.1.111 \
+  --macker-binary "$(command -v macker)"
+
+kubectl --context home-dev apply -f examples/nginx-native.yaml
+kubectl --context home-dev rollout status deployment/nginx-native
+kubectl --context home-dev get pod,svc,ingress -l app=nginx-native -o wide
+kubectl --context home-dev get endpointslice -l kubernetes.io/service-name=nginx-native -o wide
+```
+
+Such a Pod is eligible for the initial native runtime when `join` has VXLAN
 enabled and can find Macker. maclet currently supports one container per Pod,
 uses the PodCIDR's `.1` bridge address and `.2` synthetic gateway as reserved
 addresses, and allocates workload aliases from `.3` upward. It invokes:
@@ -198,6 +282,38 @@ slice intentionally rejects multiple containers, non-service-account volume
 mounts, `valueFrom` environment entries, custom working directories, and
 `hostPort` mappings. Supply `--macker-binary` to `join` when Macker is not on
 `PATH`; image layouts must already be available in Macker's image store.
+
+### Service and Ingress caveat
+
+The example Service is `ClusterIP`, so it does not need ServiceLB. The existing
+Traefik DaemonSet listens on ports 80 and 443 on the Linux nodes and can proxy
+the Service to the maclet Pod IP through Flannel. cert-manager can also use the
+existing `letsencrypt` ClusterIssuer, which is configured for Traefik HTTP-01
+challenges.
+
+This is currently a single-peer network experiment, not a production ingress
+path. Traffic through Linux node `192.168.1.111` has been validated; traffic
+that enters through the other Linux nodes is not yet reliable because maclet's
+return path currently uses one selected Linux Flannel VTEP. For a first test,
+point `nginx.dev.initialed85.cc` at `192.168.1.111` (or otherwise ensure the
+request reaches that node) rather than all four ingress addresses. Multi-peer
+VTEP return routing is still future work.
+
+The hostname must resolve to a reachable Traefik node for the HTTP-01
+certificate challenge. In the development environment, check this before
+applying the manifest:
+
+```sh
+dig +short nginx.dev.initialed85.cc
+kubectl --context home-dev get ingressclass traefik
+kubectl --context home-dev get clusterissuer letsencrypt
+```
+
+If the hostname resolves only to a private or unrelated address, the Ingress
+object will still be accepted but Let's Encrypt will not be able to complete
+HTTP-01 validation. The TLS secret is created asynchronously by cert-manager;
+inspect it with `kubectl --context home-dev describe certificate` or
+`kubectl --context home-dev describe ingress nginx-native`.
 
 ## VXLAN network handoff
 
