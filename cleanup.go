@@ -29,6 +29,7 @@ type cleanupControllerConfig struct {
 	Context     string
 	Interval    time.Duration
 	StaleAfter  time.Duration
+	Once        bool
 	InsecureTLS bool
 }
 
@@ -111,16 +112,22 @@ func runCleanupController(ctx context.Context, cfg cleanupControllerConfig) erro
 			return fmt.Errorf("load in-cluster cleanup credentials: %w", err)
 		}
 	}
-	cleanup := func() {
+	cleanup := func() error {
 		removed, cleanupErr := cleanupTerminatingPods(ctx, client, cfg.NodeName, cfg.Namespace, cfg.StaleAfter, time.Now())
-		if cleanupErr != nil {
-			log.Printf("warning: native Pod cleanup: %v", cleanupErr)
-		}
 		if removed > 0 {
 			log.Printf("removed %d stale native Pod(s)", removed)
 		}
+		return cleanupErr
 	}
-	cleanup()
+	if err := cleanup(); err != nil {
+		if cfg.Once {
+			return err
+		}
+		log.Printf("warning: native Pod cleanup: %v", err)
+	}
+	if cfg.Once {
+		return nil
+	}
 	ticker := time.NewTicker(cfg.Interval)
 	defer ticker.Stop()
 	for {
@@ -128,7 +135,9 @@ func runCleanupController(ctx context.Context, cfg cleanupControllerConfig) erro
 		case <-ctx.Done():
 			return nil
 		case <-ticker.C:
-			cleanup()
+			if err := cleanup(); err != nil {
+				log.Printf("warning: native Pod cleanup: %v", err)
+			}
 		}
 	}
 }
@@ -143,6 +152,7 @@ func cleanupControllerCommand(args []string) error {
 	flags.StringVar(&cfg.Context, "context", "", "kubeconfig context for cleanup")
 	flags.DurationVar(&cfg.Interval, "interval", defaultCleanupInterval, "cleanup polling interval")
 	flags.DurationVar(&cfg.StaleAfter, "stale-after", defaultCleanupStaleAfter, "minimum age of a Pod deletion timestamp before force deletion")
+	flags.BoolVar(&cfg.Once, "once", false, "run one cleanup pass and exit")
 	flags.BoolVar(&cfg.InsecureTLS, "insecure-skip-tls-verify", false, "disable TLS verification (development only)")
 	if err := flags.Parse(args); err != nil {
 		return err
