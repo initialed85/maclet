@@ -194,6 +194,11 @@ spec:
           operator: Equal
           value: "true"
           effect: NoSchedule
+      volumes:
+        - name: index-html
+          hostPath:
+            path: /Users/edwardbeech/Desktop/index.html
+            type: File
       containers:
         - name: nginx
           image: docker.io/initialed85/nginx:latest
@@ -201,6 +206,10 @@ spec:
             - name: http
               containerPort: 8080
               protocol: TCP
+          volumeMounts:
+            - name: index-html
+              mountPath: /usr/share/nginx/html/
+              subPath: index.html
 ---
 apiVersion: v1
 kind: Service
