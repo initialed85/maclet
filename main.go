@@ -43,6 +43,7 @@ const (
 	defaultVXLANMTU          = 1450
 	defaultClusterCIDR       = "10.42.0.0/16"
 	defaultServiceCIDR       = "10.43.0.0/16"
+	defaultMaxPods           = 110
 	defaultLeaseDurationSecs = 40
 	defaultHeartbeat         = 10 * time.Second
 )
@@ -824,8 +825,12 @@ func nodeStatus(name, nodeIP, externalIP string, now time.Time) NodeStatus {
 	if output, err := exec.Command("sw_vers", "-productVersion").Output(); err == nil {
 		osImage = "macOS " + strings.TrimSpace(string(output))
 	}
+	capacity := map[string]string{"pods": strconv.Itoa(defaultMaxPods)}
+	allocatable := map[string]string{"pods": strconv.Itoa(defaultMaxPods)}
 	return NodeStatus{
-		Addresses: addresses,
+		Addresses:   addresses,
+		Capacity:    capacity,
+		Allocatable: allocatable,
 		Conditions: []NodeCondition{
 			{Type: "MemoryPressure", Status: "False", LastHeartbeatTime: stamp, LastTransitionTime: stamp, Reason: "MacletHasSufficientMemory", Message: "maclet does not report memory pressure"},
 			{Type: "DiskPressure", Status: "False", LastHeartbeatTime: stamp, LastTransitionTime: stamp, Reason: "MacletHasNoDiskPressure", Message: "maclet does not report disk pressure"},

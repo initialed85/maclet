@@ -263,9 +263,12 @@ kubectl --context home-dev get endpointslice -l kubernetes.io/service-name=nginx
 ```
 
 Such a Pod is eligible for the initial native runtime when `join` has VXLAN
-enabled and can find Macker. maclet currently supports one container per Pod,
-uses the PodCIDR's `.1` bridge address and `.2` synthetic gateway as reserved
-addresses, and allocates workload aliases from `.3` upward. It invokes:
+enabled and can find Macker. maclet advertises capacity for up to 110 Pods so
+the Kubernetes scheduler can place workloads; this is a scheduling hint, not a
+hard process or resource limit. maclet currently supports one container per
+Pod, uses the PodCIDR's `.1` bridge address and `.2` synthetic gateway as
+reserved addresses, and allocates workload aliases from `.3` upward. It
+invokes:
 
 ```text
 macker run --detach --net=external --interface <vxlan-bridge> --ip <pod-ip>

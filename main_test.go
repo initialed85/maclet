@@ -183,6 +183,9 @@ func TestNodeStatusIncludesExternalIP(t *testing.T) {
 	if status.Addresses[1].Type != "ExternalIP" || status.Addresses[1].Address != "192.168.137.111" {
 		t.Errorf("external address = %#v", status.Addresses[1])
 	}
+	if status.Capacity["pods"] != "110" || status.Allocatable["pods"] != "110" {
+		t.Errorf("pod capacity = %q/%q, want 110/110", status.Capacity["pods"], status.Allocatable["pods"])
+	}
 }
 
 func TestDesiredNode(t *testing.T) {
