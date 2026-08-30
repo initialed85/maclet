@@ -29,6 +29,7 @@ import (
 	osuser "os/user"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -689,15 +690,35 @@ type DarwinRoute struct {
 	Gateway string
 }
 
+type FlannelPeer struct {
+	NodeName string
+	PodCIDR  string
+	PublicIP string
+	VtepMAC  string
+}
+
+type DarwinPeerGateway struct {
+	PodCIDR  string
+	Gateway  string
+	MAC      string
+	PublicIP string
+}
+
+type DarwinARPEntry struct {
+	IP  string
+	MAC string
+}
+
 type DarwinNetworkHandle struct {
-	Interface  string
-	PodCIDR    string
-	Gateway    string
-	GatewayMAC string
-	ARPAdded   bool
-	Routes     []DarwinRoute
-	Aliases    []string
-	useSudo    bool
+	Interface    string
+	PodCIDR      string
+	Gateway      string
+	GatewayMAC   string
+	PeerGateways []DarwinPeerGateway
+	ARPs         []DarwinARPEntry
+	Routes       []DarwinRoute
+	Aliases      []string
+	useSudo      bool
 }
 
 const (
@@ -1333,7 +1354,7 @@ func preparePrivileges(cfg *JoinConfig) error {
 	return nil
 }
 
-func startVXLAN(ctx context.Context, cfg JoinConfig, node *Node) (*VXLANHandle, error) {
+func startVXLAN(ctx context.Context, cfg JoinConfig, node *Node, peers []FlannelPeer) (*VXLANHandle, error) {
 	if cfg.VXLANBinary == "" {
 		return nil, nil
 	}
@@ -1361,11 +1382,23 @@ func startVXLAN(ctx context.Context, cfg JoinConfig, node *Node) (*VXLANHandle, 
 	arguments := []string{
 		"--vni", "1",
 		"--local", local,
+		// Keep the selected peer as a fallback for service traffic and for
+		// older darwin-vxlan binaries. New binaries use the peer MAC mappings
+		// below for destination-specific PodCIDR traffic.
 		"--remote", cfg.VXLANRemote,
 		"--port", fmt.Sprint(cfg.VXLANPort),
 		"--mtu", fmt.Sprint(cfg.VXLANMTU),
 		"--bridge-ipv4", bridgeCIDR,
 	}
+	for _, peer := range peers {
+		// maclet installs per-PodCIDR synthetic gateways with each peer's
+		// VtepMAC. darwin-vxlan uses the inner destination IP to select this
+		// peer's underlay endpoint while preserving the Ethernet frame.
+		arguments = append(arguments, "--peer", peer.PodCIDR+"="+peer.PublicIP)
+	}
+	// ClusterIP traffic must use the selected Linux node as its service
+	// gateway; kube-proxy on that node can then select the actual backend.
+	arguments = append(arguments, "--peer", cfg.ServiceCIDR+"="+cfg.VXLANRemote)
 	if existingBridge, err := interfaceForAddress(bridgeCIDR); err != nil {
 		return nil, fmt.Errorf("inspect existing VXLAN bridge address: %w", err)
 	} else if existingBridge != "" {
@@ -1607,6 +1640,65 @@ func clearFlannel(ctx context.Context, client *APIClient, nodeName string) error
 	return nil
 }
 
+func discoverFlannelPeers(ctx context.Context, client *APIClient, localNodeName string) ([]FlannelPeer, error) {
+	body, err := client.get(ctx, "/api/v1/nodes")
+	if err != nil {
+		var apiErr *HTTPError
+		if errors.As(err, &apiErr) && apiErr.Code == http.StatusForbidden {
+			return nil, errors.New("the peer client cannot read Nodes; provide a peer kubeconfig with Node list access or use --vxlan-gateway-mac for single-peer mode")
+		}
+		return nil, fmt.Errorf("list Nodes to discover Flannel peers: %w", err)
+	}
+	var nodes NodeList
+	if err := json.Unmarshal(body, &nodes); err != nil {
+		return nil, fmt.Errorf("decode Node list for Flannel peers: %w", err)
+	}
+	peers := make([]FlannelPeer, 0, len(nodes.Items))
+	for _, node := range nodes.Items {
+		if node.Metadata.Name == localNodeName {
+			continue
+		}
+		annotations := node.Metadata.Annotations
+		if annotations[flannelBackendTypeAnnotation] != "vxlan" {
+			continue
+		}
+		cidr := node.Spec.PodCIDR
+		if cidr == "" && len(node.Spec.PodCIDRs) > 0 {
+			cidr = node.Spec.PodCIDRs[0]
+		}
+		if cidr == "" || annotations[flannelPublicIPAnnotation] == "" || annotations[flannelBackendDataAnnotation] == "" {
+			continue
+		}
+		if _, network, err := net.ParseCIDR(cidr); err != nil || network.IP.To4() == nil {
+			continue
+		}
+		var backend flannelBackendData
+		if err := json.Unmarshal([]byte(annotations[flannelBackendDataAnnotation]), &backend); err != nil {
+			return nil, fmt.Errorf("decode Flannel backend data for node %s: %w", node.Metadata.Name, err)
+		}
+		if backend.VNI != 1 {
+			continue
+		}
+		mac, err := net.ParseMAC(backend.VtepMAC)
+		if err != nil || len(mac) != 6 {
+			return nil, fmt.Errorf("node %s has invalid Flannel VtepMAC %q", node.Metadata.Name, backend.VtepMAC)
+		}
+		if net.ParseIP(annotations[flannelPublicIPAnnotation]) == nil {
+			return nil, fmt.Errorf("node %s has invalid Flannel public IP %q", node.Metadata.Name, annotations[flannelPublicIPAnnotation])
+		}
+		peers = append(peers, FlannelPeer{
+			NodeName: node.Metadata.Name,
+			PodCIDR:  cidr,
+			PublicIP: annotations[flannelPublicIPAnnotation],
+			VtepMAC:  mac.String(),
+		})
+	}
+	sort.Slice(peers, func(i, j int) bool {
+		return peers[i].PodCIDR < peers[j].PodCIDR
+	})
+	return peers, nil
+}
+
 func remoteVtepMAC(ctx context.Context, client *APIClient, remoteIP, override string) (string, error) {
 	if override != "" {
 		mac, err := net.ParseMAC(override)
@@ -1615,31 +1707,14 @@ func remoteVtepMAC(ctx context.Context, client *APIClient, remoteIP, override st
 		}
 		return mac.String(), nil
 	}
-	body, err := client.get(ctx, "/api/v1/nodes")
+	peers, err := discoverFlannelPeers(ctx, client, "")
 	if err != nil {
-		var apiErr *HTTPError
-		if errors.As(err, &apiErr) && apiErr.Code == http.StatusForbidden {
-			return "", errors.New("the node identity cannot read other Nodes; supply --vxlan-gateway-mac with the selected remote flannel.1 MAC")
-		}
-		return "", fmt.Errorf("list Nodes to discover Flannel gateway MAC: %w", err)
+		return "", err
 	}
-	var nodes NodeList
-	if err := json.Unmarshal(body, &nodes); err != nil {
-		return "", fmt.Errorf("decode Node list for Flannel gateway MAC: %w", err)
-	}
-	for _, node := range nodes.Items {
-		if node.Metadata.Annotations[flannelPublicIPAnnotation] != remoteIP {
-			continue
+	for _, peer := range peers {
+		if peer.PublicIP == remoteIP {
+			return peer.VtepMAC, nil
 		}
-		var backend flannelBackendData
-		if err := json.Unmarshal([]byte(node.Metadata.Annotations[flannelBackendDataAnnotation]), &backend); err != nil {
-			return "", fmt.Errorf("decode Flannel backend data for node %s: %w", node.Metadata.Name, err)
-		}
-		mac, err := net.ParseMAC(backend.VtepMAC)
-		if err != nil || len(mac) != 6 {
-			return "", fmt.Errorf("node %s has invalid Flannel VtepMAC %q", node.Metadata.Name, backend.VtepMAC)
-		}
-		return mac.String(), nil
 	}
 	return "", fmt.Errorf("no Flannel node annotation matches VXLAN remote %q; use --vxlan-gateway-mac to provide that node's flannel.1 MAC", remoteIP)
 }
@@ -1733,8 +1808,38 @@ func firstAvailableWorkloadIP(cidr string, used map[string]bool) (string, error)
 	return "", fmt.Errorf("PodCIDR %q has no available workload addresses", cidr)
 }
 
-func setupDarwinNetwork(cfg JoinConfig, vxlan *VXLANHandle, gatewayMAC string) (*DarwinNetworkHandle, error) {
-	gateway, err := gatewayAddressForCIDR(vxlan.BridgeCIDR)
+func peerGatewayAddressForCIDR(cidr string, index int) (string, error) {
+	_, network, err := net.ParseCIDR(cidr)
+	if err != nil {
+		return "", fmt.Errorf("parse PodCIDR %q: %w", cidr, err)
+	}
+	ip4 := network.IP.To4()
+	if ip4 == nil {
+		return "", errors.New("only IPv4 PodCIDRs are currently supported")
+	}
+	prefix, bits := network.Mask.Size()
+	if bits != 32 || prefix > 30 {
+		return "", fmt.Errorf("PodCIDR %q does not have enough gateway addresses", cidr)
+	}
+	hostBits := bits - prefix
+	broadcastOffset := uint32(1<<hostBits) - 1
+	var offset uint32
+	if index == 0 {
+		offset = 2
+	} else {
+		if uint32(index) >= broadcastOffset-2 {
+			return "", fmt.Errorf("PodCIDR %q has no address for peer gateway %d", cidr, index)
+		}
+		offset = broadcastOffset - uint32(index)
+	}
+	value := binary.BigEndian.Uint32(ip4) + offset
+	gateway := make(net.IP, net.IPv4len)
+	binary.BigEndian.PutUint32(gateway, value)
+	return gateway.String(), nil
+}
+
+func setupDarwinNetwork(cfg JoinConfig, vxlan *VXLANHandle, peers []FlannelPeer, gatewayMAC string) (*DarwinNetworkHandle, error) {
+	gateway, err := peerGatewayAddressForCIDR(vxlan.BridgeCIDR, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -1742,14 +1847,19 @@ func setupDarwinNetwork(cfg JoinConfig, vxlan *VXLANHandle, gatewayMAC string) (
 	if err != nil || len(mac) != 6 {
 		return nil, fmt.Errorf("parse Flannel gateway MAC %q", gatewayMAC)
 	}
-	routes := make([]DarwinRoute, 0, 2)
-	for _, cidr := range []string{cfg.ClusterCIDR, cfg.ServiceCIDR} {
-		route, err := routeSpec(cidr)
-		if err != nil {
-			return nil, err
+	orderedPeers := make([]FlannelPeer, 0, len(peers))
+	for _, peer := range peers {
+		if peer.PublicIP == cfg.VXLANRemote {
+			orderedPeers = append(orderedPeers, peer)
 		}
-		route.Gateway = gateway
-		routes = append(routes, route)
+	}
+	for _, peer := range peers {
+		if peer.PublicIP != cfg.VXLANRemote {
+			orderedPeers = append(orderedPeers, peer)
+		}
+	}
+	if len(orderedPeers) > 0 && orderedPeers[0].PublicIP != cfg.VXLANRemote {
+		return nil, fmt.Errorf("no discovered Flannel peer matches VXLAN remote %q", cfg.VXLANRemote)
 	}
 	handle := &DarwinNetworkHandle{
 		Interface:  vxlan.BridgeName,
@@ -1758,11 +1868,69 @@ func setupDarwinNetwork(cfg JoinConfig, vxlan *VXLANHandle, gatewayMAC string) (
 		GatewayMAC: mac.String(),
 		useSudo:    cfg.useSudo,
 	}
-	arpCommand := privilegedCommand(cfg.useSudo, "arp", "-S", gateway, mac.String(), "ifscope", vxlan.BridgeName)
-	if output, err := arpCommand.CombinedOutput(); err != nil {
-		return nil, fmt.Errorf("install Darwin ARP gateway %s on %s: %w (%s)", gateway, vxlan.BridgeName, err, strings.TrimSpace(string(output)))
+	addGateway := func(peer FlannelPeer, peerGateway, peerMAC string) error {
+		for _, existing := range handle.PeerGateways {
+			if existing.Gateway == peerGateway || existing.PodCIDR == peer.PodCIDR {
+				return fmt.Errorf("duplicate Darwin peer gateway %s or PodCIDR %s", peerGateway, peer.PodCIDR)
+			}
+		}
+		handle.PeerGateways = append(handle.PeerGateways, DarwinPeerGateway{
+			PodCIDR: peer.PodCIDR, Gateway: peerGateway, MAC: peerMAC, PublicIP: peer.PublicIP,
+		})
+		handle.ARPs = append(handle.ARPs, DarwinARPEntry{IP: peerGateway, MAC: peerMAC})
+		return nil
 	}
-	handle.ARPAdded = true
+	if len(orderedPeers) == 0 {
+		if err := addGateway(FlannelPeer{PublicIP: cfg.VXLANRemote}, gateway, mac.String()); err != nil {
+			return nil, err
+		}
+	} else {
+		for index, peer := range orderedPeers {
+			peerMAC, parseErr := net.ParseMAC(peer.VtepMAC)
+			if parseErr != nil || len(peerMAC) != 6 {
+				return nil, fmt.Errorf("parse Flannel VtepMAC %q for node %s", peer.VtepMAC, peer.NodeName)
+			}
+			peerGateway, gatewayErr := peerGatewayAddressForCIDR(vxlan.BridgeCIDR, index)
+			if gatewayErr != nil {
+				return nil, gatewayErr
+			}
+			if err := addGateway(peer, peerGateway, peerMAC.String()); err != nil {
+				return nil, err
+			}
+		}
+	}
+	routes := make([]DarwinRoute, 0, 2+len(orderedPeers))
+	for _, cidr := range []string{cfg.ClusterCIDR, cfg.ServiceCIDR} {
+		route, err := routeSpec(cidr)
+		if err != nil {
+			return nil, err
+		}
+		route.Gateway = gateway
+		routes = append(routes, route)
+	}
+	for _, peer := range orderedPeers {
+		route, err := routeSpec(peer.PodCIDR)
+		if err != nil {
+			return nil, err
+		}
+		for _, peerGateway := range handle.PeerGateways {
+			if peerGateway.PodCIDR == peer.PodCIDR {
+				route.Gateway = peerGateway.Gateway
+				break
+			}
+		}
+		routes = append(routes, route)
+	}
+	for _, arp := range handle.ARPs {
+		command := privilegedCommand(cfg.useSudo, "arp", "-S", arp.IP, arp.MAC, "ifscope", vxlan.BridgeName)
+		if output, err := command.CombinedOutput(); err != nil {
+			cleanupErr := handle.cleanup()
+			if cleanupErr != nil {
+				return nil, fmt.Errorf("install Darwin ARP gateway %s on %s: %w (cleanup: %v; output: %s)", arp.IP, vxlan.BridgeName, err, cleanupErr, strings.TrimSpace(string(output)))
+			}
+			return nil, fmt.Errorf("install Darwin ARP gateway %s on %s: %w (%s)", arp.IP, vxlan.BridgeName, err, strings.TrimSpace(string(output)))
+		}
+	}
 	for _, route := range routes {
 		command := privilegedCommand(cfg.useSudo, "route", "-n", "add", "-net", route.Network, "-netmask", route.Netmask, route.Gateway)
 		if output, err := command.CombinedOutput(); err != nil {
@@ -1790,10 +1958,7 @@ func (h *DarwinNetworkHandle) addWorkloadIP(ip string) error {
 	if !network.Contains(parsed) {
 		return fmt.Errorf("workload address %s is outside PodCIDR %s", ip, h.PodCIDR)
 	}
-	gatewayIP := net.ParseIP(h.Gateway)
-	bridgeIP, _ := bridgeAddressForCIDR(h.PodCIDR)
-	bridgeAddress := net.ParseIP(strings.Split(bridgeIP, "/")[0])
-	if parsed.Equal(gatewayIP) || parsed.Equal(bridgeAddress) || parsed.Equal(network.IP) {
+	if h.isReservedWorkloadIP(parsed, network.IP) {
 		return fmt.Errorf("workload address %s is reserved by maclet", ip)
 	}
 	prefix, bits := network.Mask.Size()
@@ -1817,6 +1982,45 @@ func (h *DarwinNetworkHandle) addWorkloadIP(ip string) error {
 	}
 	h.Aliases = append(h.Aliases, canonicalIP)
 	return nil
+}
+
+func (h *DarwinNetworkHandle) isReservedWorkloadIP(ip, networkIP net.IP) bool {
+	if ip.Equal(networkIP) {
+		return true
+	}
+	bridgeIP, _ := bridgeAddressForCIDR(h.PodCIDR)
+	bridgeAddress := net.ParseIP(strings.Split(bridgeIP, "/")[0])
+	if ip.Equal(bridgeAddress) || ip.Equal(net.ParseIP(h.Gateway)) {
+		return true
+	}
+	for _, peer := range h.PeerGateways {
+		if ip.Equal(net.ParseIP(peer.Gateway)) {
+			return true
+		}
+	}
+	return false
+}
+
+func (h *DarwinNetworkHandle) firstAvailableWorkloadIP(used map[string]bool) (string, error) {
+	_, network, err := net.ParseCIDR(h.PodCIDR)
+	if err != nil {
+		return "", fmt.Errorf("parse PodCIDR %q: %w", h.PodCIDR, err)
+	}
+	prefix, bits := network.Mask.Size()
+	if bits != 32 {
+		return "", errors.New("only IPv4 PodCIDRs are currently supported")
+	}
+	broadcastOffset := uint32(1<<(bits-prefix)) - 1
+	for offset := uint32(3); offset < broadcastOffset; offset++ {
+		ip, err := workloadIPForOffset(h.PodCIDR, offset)
+		if err != nil {
+			return "", err
+		}
+		if !used[ip] && !h.isReservedWorkloadIP(net.ParseIP(ip), network.IP) {
+			return ip, nil
+		}
+	}
+	return "", fmt.Errorf("PodCIDR %q has no available workload addresses", h.PodCIDR)
 }
 
 func (h *DarwinNetworkHandle) removeWorkloadIP(ip string) error {
@@ -1857,6 +2061,12 @@ func (h *DarwinNetworkHandle) setGatewayMAC(mac string) error {
 	if output, err := command.CombinedOutput(); err != nil {
 		return fmt.Errorf("update Darwin ARP gateway %s on %s: %w (%s)", h.Gateway, h.Interface, err, strings.TrimSpace(string(output)))
 	}
+	for index := range h.ARPs {
+		if h.ARPs[index].IP == h.Gateway {
+			h.ARPs[index].MAC = mac
+			break
+		}
+	}
 	h.GatewayMAC = mac
 	return nil
 }
@@ -1875,10 +2085,11 @@ func (h *DarwinNetworkHandle) cleanup() error {
 			cleanupErrors = append(cleanupErrors, fmt.Errorf("delete route %s/%s: %w (%s)", route.Network, route.Netmask, err, strings.TrimSpace(string(output))))
 		}
 	}
-	if h.ARPAdded {
-		command := privilegedCommand(h.useSudo, "arp", "-d", h.Gateway, "ifscope", h.Interface)
+	for i := len(h.ARPs) - 1; i >= 0; i-- {
+		arp := h.ARPs[i]
+		command := privilegedCommand(h.useSudo, "arp", "-d", arp.IP, "ifscope", h.Interface)
 		if output, err := command.CombinedOutput(); err != nil {
-			cleanupErrors = append(cleanupErrors, fmt.Errorf("delete ARP gateway %s: %w (%s)", h.Gateway, err, strings.TrimSpace(string(output))))
+			cleanupErrors = append(cleanupErrors, fmt.Errorf("delete ARP gateway %s: %w (%s)", arp.IP, err, strings.TrimSpace(string(output))))
 		}
 	}
 	return errors.Join(cleanupErrors...)
@@ -1946,18 +2157,28 @@ func runJoin(cfg JoinConfig) error {
 		log.Printf("Kubernetes has not assigned a PodCIDR yet; continuing without starting VXLAN")
 	}
 	var peerClient *APIClient
+	var peers []FlannelPeer
 	var gatewayMAC string
 	if cfg.VXLANBinary != "" && cfg.VXLANGatewayMAC == "" {
 		peerClient, err = peerAPIClient(cfg, state)
 		if err != nil {
 			return err
 		}
-		gatewayMAC, err = remoteVtepMAC(ctx, peerClient, cfg.VXLANRemote, "")
+		peers, err = discoverFlannelPeers(ctx, peerClient, state.NodeName)
 		if err != nil {
 			return err
 		}
+		for _, peer := range peers {
+			if peer.PublicIP == cfg.VXLANRemote {
+				gatewayMAC = peer.VtepMAC
+				break
+			}
+		}
+		if gatewayMAC == "" {
+			return fmt.Errorf("no Flannel peer matches VXLAN remote %q; use --vxlan-gateway-mac to provide that node's flannel.1 MAC", cfg.VXLANRemote)
+		}
 	}
-	vxlan, err := startVXLAN(ctx, cfg, node)
+	vxlan, err := startVXLAN(ctx, cfg, node, peers)
 	if err != nil {
 		return err
 	}
@@ -1971,7 +2192,7 @@ func runJoin(cfg JoinConfig) error {
 				return err
 			}
 		}
-		darwinNetwork, err = setupDarwinNetwork(cfg, vxlan, gatewayMAC)
+		darwinNetwork, err = setupDarwinNetwork(cfg, vxlan, peers, gatewayMAC)
 		if err != nil {
 			vxlan.cleanup()
 			return err

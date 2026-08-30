@@ -156,6 +156,65 @@ func TestBridgeAddressForCIDR(t *testing.T) {
 	}
 }
 
+func TestPeerGatewayAddressForCIDR(t *testing.T) {
+	for index, want := range map[int]string{0: "10.42.8.2", 1: "10.42.8.254", 2: "10.42.8.253"} {
+		got, err := peerGatewayAddressForCIDR("10.42.8.0/24", index)
+		if err != nil {
+			t.Fatalf("peerGatewayAddressForCIDR(%d): %v", index, err)
+		}
+		if got != want {
+			t.Errorf("peerGatewayAddressForCIDR(%d) = %q, want %q", index, got, want)
+		}
+	}
+	if _, err := peerGatewayAddressForCIDR("10.42.8.0/30", 1); err == nil {
+		t.Error("peerGatewayAddressForCIDR accepted a gateway beyond a /30")
+	}
+}
+
+func TestDiscoverFlannelPeers(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/api/v1/nodes" {
+			http.NotFound(response, request)
+			return
+		}
+		_ = json.NewEncoder(response).Encode(NodeList{Items: []Node{
+			{
+				Metadata: ObjectMeta{Name: "maclet"},
+			},
+			{
+				Metadata: ObjectMeta{
+					Name: "k3s-ocnus",
+					Annotations: map[string]string{
+						flannelBackendTypeAnnotation:   "vxlan",
+						flannelBackendDataAnnotation:   `{"VNI":1,"VtepMAC":"fa:14:03:ab:e4:83"}`,
+						flannelPublicIPAnnotation:      "192.168.1.111",
+						flannelSubnetManagerAnnotation: "true",
+					},
+				},
+				Spec: NodeSpec{PodCIDR: "10.42.0.0/24"},
+			},
+			{
+				Metadata: ObjectMeta{
+					Name:        "ignored",
+					Annotations: map[string]string{flannelBackendTypeAnnotation: "host-gw"},
+				},
+			},
+		}})
+	}))
+	defer server.Close()
+	client, err := newAPIClient(server.URL, nil, "", "", true, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	peers, err := discoverFlannelPeers(context.Background(), client, "maclet")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(peers) != 1 || peers[0].NodeName != "k3s-ocnus" || peers[0].PodCIDR != "10.42.0.0/24" || peers[0].VtepMAC != "fa:14:03:ab:e4:83" {
+		t.Fatalf("discovered peers = %#v", peers)
+	}
+}
+
 func TestFlannelAnnotations(t *testing.T) {
 	annotations, err := flannelAnnotations("192.168.137.111", "5e:e9:1e:e7:7b:65")
 	if err != nil {

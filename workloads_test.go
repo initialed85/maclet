@@ -19,6 +19,20 @@ func TestMackerContainerStatus(t *testing.T) {
 	}
 }
 
+func TestDarwinNetworkPeerGatewayReservation(t *testing.T) {
+	network := &DarwinNetworkHandle{
+		PodCIDR:      "10.42.8.0/24",
+		Gateway:      "10.42.8.2",
+		PeerGateways: []DarwinPeerGateway{{Gateway: "10.42.8.254"}},
+	}
+	if got, err := network.firstAvailableWorkloadIP(map[string]bool{}); err != nil || got != "10.42.8.3" {
+		t.Fatalf("firstAvailableWorkloadIP() = %q, %v; want 10.42.8.3", got, err)
+	}
+	if err := network.validateWorkloadAddress("10.42.8.254"); err == nil {
+		t.Error("validateWorkloadAddress accepted a peer gateway")
+	}
+}
+
 func TestWorkloadContainerName(t *testing.T) {
 	pod := Pod{Metadata: ObjectMeta{Namespace: "Demo_Namespace", Name: "hello.world", UID: "ABC-123"}}
 	name := workloadContainerName(pod)

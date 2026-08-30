@@ -446,7 +446,7 @@ func (m *workloadManager) reconcile(ctx context.Context, client *APIClient, pods
 		}
 		ip := pod.Status.PodIP
 		if ip == "" {
-			allocated, err := firstAvailableWorkloadIP(m.network.PodCIDR, used)
+			allocated, err := m.network.firstAvailableWorkloadIP(used)
 			if err != nil {
 				reconcileErrors = append(reconcileErrors, fmt.Errorf("allocate address for Pod %s/%s: %w", pod.Metadata.Namespace, pod.Metadata.Name, err))
 				_ = m.updateStatus(ctx, client, pod, "Pending", "", "MacletAddressAllocationFailed", err.Error(), false, managed.RestartCount)
@@ -455,7 +455,7 @@ func (m *workloadManager) reconcile(ctx context.Context, client *APIClient, pods
 			ip = allocated
 			used[ip] = true
 		}
-		if err := validateWorkloadAddress(m.network.PodCIDR, ip); err != nil {
+		if err := m.network.validateWorkloadAddress(ip); err != nil {
 			reconcileErrors = append(reconcileErrors, fmt.Errorf("Pod %s/%s has invalid PodIP %s: %w", pod.Metadata.Namespace, pod.Metadata.Name, ip, err))
 			_ = m.updateStatus(ctx, client, pod, "Failed", ip, "MacletInvalidPodIP", err.Error(), false, managed.RestartCount)
 			continue
@@ -582,6 +582,18 @@ func validateWorkloadAddress(cidr, ip string) error {
 	broadcastOffset := uint32(1<<hostBits) - 1
 	if offset < 3 || offset >= broadcastOffset {
 		return errors.New("address is reserved or is the PodCIDR broadcast address")
+	}
+	return nil
+}
+
+func (h *DarwinNetworkHandle) validateWorkloadAddress(ip string) error {
+	if err := validateWorkloadAddress(h.PodCIDR, ip); err != nil {
+		return err
+	}
+	parsed := net.ParseIP(ip).To4()
+	_, network, _ := net.ParseCIDR(h.PodCIDR)
+	if h.isReservedWorkloadIP(parsed, network.IP) {
+		return errors.New("address is reserved by maclet")
 	}
 	return nil
 }
