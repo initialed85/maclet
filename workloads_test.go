@@ -11,6 +11,37 @@ import (
 	"testing"
 )
 
+func TestWorkloadJournalRoundTrip(t *testing.T) {
+	stateDir := t.TempDir()
+	manager := newWorkloadManagerWithState(nil, "", "", stateDir)
+	manager.workloads["uid-1"] = &managedWorkload{
+		UID: "uid-1", Namespace: "default", Name: "web",
+		ContainerName: "maclet-default-web-uid-1", IP: "10.42.8.3", RestartCount: 2,
+	}
+	if err := manager.persistJournal(); err != nil {
+		t.Fatal(err)
+	}
+	loaded := newWorkloadManagerWithState(nil, "", "", stateDir)
+	if err := loaded.loadJournal(); err != nil {
+		t.Fatal(err)
+	}
+	workload := loaded.workloads["uid-1"]
+	if workload == nil || workload.Namespace != "default" || workload.Name != "web" || workload.ContainerName != "maclet-default-web-uid-1" || workload.IP != "10.42.8.3" || workload.RestartCount != 2 {
+		t.Fatalf("loaded workload = %#v", workload)
+	}
+	body, err := os.ReadFile(filepath.Join(stateDir, "workloads.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var journal workloadJournal
+	if err := json.Unmarshal(body, &journal); err != nil {
+		t.Fatal(err)
+	}
+	if journal.Version != 1 || len(journal.Workloads) != 1 {
+		t.Fatalf("journal = %#v", journal)
+	}
+}
+
 func TestMackerContainerStatus(t *testing.T) {
 	output := "NAME\tIMAGE\tSTATUS\tNETWORK\tPID\tPORTS\tCREATED\n" +
 		"maclet-default-web-uid\tdocker.io/example/web:latest\trunning\tbridge101:10.42.8.3\t1234\t-\t2026-08-30T09:00:00Z\n"
@@ -125,6 +156,11 @@ func TestMackerVolumeArgsRejectsUnsupportedMounts(t *testing.T) {
 	}
 	if _, err := mackerVolumeArgs(Pod{Spec: PodSpec{Volumes: []Volume{{Name: "projected"}}}}, ContainerSpec{VolumeMounts: []VolumeMount{{Name: "projected", MountPath: "/data"}}}); err == nil || !strings.Contains(err.Error(), "supported hostPath") {
 		t.Fatalf("non-hostPath mount error = %v, want unsupported hostPath error", err)
+	}
+	if _, err := mackerVolumeArgs(Pod{Spec: PodSpec{Volumes: []Volume{
+		{Name: "existing", HostPath: &HostPathVolumeSource{Path: existing, Type: "Directory"}},
+	}}}, ContainerSpec{VolumeMounts: []VolumeMount{{Name: "existing", MountPath: "/data", SubPathExpr: "$(POD_NAME)"}}}); err == nil || !strings.Contains(err.Error(), "subPathExpr") {
+		t.Fatalf("subPathExpr mount error = %v, want subPathExpr rejection", err)
 	}
 	missing := filepath.Join(root, "created", "directory")
 	if _, err := mackerVolumeArgs(Pod{Spec: PodSpec{Volumes: []Volume{

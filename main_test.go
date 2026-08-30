@@ -253,13 +253,63 @@ func TestDesiredNode(t *testing.T) {
 		t.Errorf("OS label = %q, want darwin", node.Metadata.Labels["kubernetes.io/os"])
 	}
 	if node.Metadata.Labels["kubernetes.io/arch"] != "arm64" {
-		t.Errorf("arch label = %q, want arm64", node.Metadata.Labels["kubernetes.io/arch"])
+		t.Errorf("arch label = %q, want darwin", node.Metadata.Labels["kubernetes.io/arch"])
 	}
 	if !hasManagedTaint(node.Spec.Taints) {
 		t.Fatalf("Node taints = %#v, want managed NoSchedule taint", node.Spec.Taints)
 	}
 	if node.Spec.Taints[0].Effect != "NoSchedule" {
 		t.Errorf("taint effect = %q, want NoSchedule", node.Spec.Taints[0].Effect)
+	}
+}
+
+func TestSetNodeShutdownCordon(t *testing.T) {
+	var cordoned bool
+	server := httptest.NewTLSServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/api/v1/nodes/maclet" || request.Method != http.MethodPatch {
+			t.Fatalf("request = %s %s", request.Method, request.URL.Path)
+		}
+		var payload struct {
+			Metadata map[string]map[string]any `json:"metadata"`
+			Spec     struct {
+				Unschedulable bool `json:"unschedulable"`
+			} `json:"spec"`
+		}
+		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode patch: %v", err)
+		}
+		cordoned = payload.Spec.Unschedulable
+		if cordoned && payload.Metadata["annotations"][shutdownCordonAnnotation] != "true" {
+			t.Errorf("cordon annotation = %#v", payload.Metadata["annotations"])
+		}
+		if !cordoned && payload.Metadata["annotations"][shutdownCordonAnnotation] != nil {
+			t.Errorf("uncordon annotation = %#v", payload.Metadata["annotations"])
+		}
+		annotations := map[string]string{}
+		if cordoned {
+			annotations[shutdownCordonAnnotation] = "true"
+		}
+		_ = json.NewEncoder(response).Encode(Node{Metadata: ObjectMeta{Name: "maclet", Annotations: annotations}, Spec: NodeSpec{Unschedulable: cordoned}})
+	}))
+	defer server.Close()
+	client, err := newAPIClient(server.URL, nil, "", "", true, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	node := &Node{Metadata: ObjectMeta{Name: "maclet"}}
+	node, err = setNodeShutdownCordon(context.Background(), client, node, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cordoned || !node.Spec.Unschedulable || node.Metadata.Annotations[shutdownCordonAnnotation] != "true" {
+		t.Fatalf("cordoned node = %#v", node)
+	}
+	node, err = setNodeShutdownCordon(context.Background(), client, node, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cordoned || node.Spec.Unschedulable || node.Metadata.Annotations[shutdownCordonAnnotation] != "" {
+		t.Fatalf("uncordoned node = %#v", node)
 	}
 }
 

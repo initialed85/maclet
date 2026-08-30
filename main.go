@@ -47,6 +47,7 @@ const (
 	defaultMaxPods           = 110
 	defaultLeaseDurationSecs = 40
 	defaultHeartbeat         = 10 * time.Second
+	defaultDrainTimeout      = 10 * time.Second
 )
 
 var errNotFound = errors.New("resource not found")
@@ -684,6 +685,7 @@ type JoinConfig struct {
 	VXLANGatewayMAC       string
 	PeerKubeconfig        string
 	PeerContext           string
+	DrainTimeout          time.Duration
 	VXLANPort             int
 	VXLANMTU              int
 	ClusterCIDR           string
@@ -746,6 +748,7 @@ const (
 	flannelBackendDataAnnotation   = "flannel.alpha.coreos.com/backend-data"
 	flannelPublicIPAnnotation      = "flannel.alpha.coreos.com/public-ip"
 	flannelSubnetManagerAnnotation = "flannel.alpha.coreos.com/kube-subnet-manager"
+	shutdownCordonAnnotation       = "k8s-darwin.dev/maclet-shutdown-cordon"
 )
 
 func desiredNode(name, nodeIP string) Node {
@@ -777,6 +780,57 @@ func hasManagedTaint(taints []Taint) bool {
 		}
 	}
 	return false
+}
+
+func setNodeShutdownCordon(ctx context.Context, client *APIClient, node *Node, cordon bool) (*Node, error) {
+	marker := ""
+	if cordon {
+		marker = "true"
+	}
+	alreadyMarked := node.Metadata.Annotations[shutdownCordonAnnotation] == "true"
+	if cordon && node.Spec.Unschedulable && alreadyMarked {
+		return node, nil
+	}
+	if !cordon && !alreadyMarked {
+		return node, nil
+	}
+	path := "/api/v1/nodes/" + url.PathEscape(node.Metadata.Name)
+	current := node
+	for attempt := 0; attempt < 5; attempt++ {
+		annotations := map[string]any{shutdownCordonAnnotation: marker}
+		if !cordon {
+			annotations[shutdownCordonAnnotation] = nil
+		}
+		body, err := client.patchJSON(ctx, path, map[string]any{
+			"metadata": map[string]any{"annotations": annotations},
+			"spec":     map[string]any{"unschedulable": cordon},
+		})
+		if err == nil {
+			var updated Node
+			if decodeErr := json.Unmarshal(body, &updated); decodeErr != nil {
+				return nil, fmt.Errorf("decode Node shutdown cordon update: %w", decodeErr)
+			}
+			return &updated, nil
+		}
+		var conflict *HTTPError
+		if !errors.As(err, &conflict) || conflict.Code != http.StatusConflict || attempt == 4 {
+			return nil, fmt.Errorf("set Node %q shutdown cordon=%t: %w", current.Metadata.Name, cordon, err)
+		}
+		body, err = client.get(ctx, path)
+		if err != nil {
+			return nil, fmt.Errorf("refresh Node after shutdown cordon conflict: %w", err)
+		}
+		var refreshed Node
+		if err := json.Unmarshal(body, &refreshed); err != nil {
+			return nil, fmt.Errorf("decode Node after shutdown cordon conflict: %w", err)
+		}
+		current = &refreshed
+		alreadyMarked = current.Metadata.Annotations[shutdownCordonAnnotation] == "true"
+		if (cordon && current.Spec.Unschedulable && alreadyMarked) || (!cordon && !alreadyMarked) {
+			return current, nil
+		}
+	}
+	return nil, errors.New("Node shutdown cordon update retry limit exceeded")
 }
 
 func ensureNode(ctx context.Context, client *APIClient, name, nodeIP string) (*Node, error) {
@@ -2150,6 +2204,9 @@ func runJoin(cfg JoinConfig) error {
 			cfg.ExternalIP = vxlanPublicIP(cfg, state)
 		}
 	}
+	if cfg.DrainTimeout <= 0 {
+		cfg.DrainTimeout = defaultDrainTimeout
+	}
 	if cfg.PeerKubeconfig == "" {
 		cfg.PeerKubeconfig = state.PeerKubeconfig
 	}
@@ -2159,6 +2216,14 @@ func runJoin(cfg JoinConfig) error {
 	node, err := ensureNode(ctx, client, state.NodeName, state.NodeIP)
 	if err != nil {
 		return err
+	}
+	// Only remove a cordon that maclet itself installed during a previous
+	// graceful shutdown. Preserve an operator's independent cordon.
+	if node.Metadata.Annotations[shutdownCordonAnnotation] == "true" {
+		node, err = setNodeShutdownCordon(ctx, client, node, false)
+		if err != nil {
+			return err
+		}
 	}
 	log.Printf("Node %s registered with labels kubernetes.io/os=darwin kubernetes.io/arch=arm64 and taint %s=%s:NoSchedule", state.NodeName, managedTaintKey, managedTaintValue)
 	node, err = waitForPodCIDR(ctx, client, node, 60*time.Second)
@@ -2220,7 +2285,12 @@ func runJoin(cfg JoinConfig) error {
 			return err
 		}
 		log.Printf("published Flannel VXLAN metadata for %s: publicIP=%s vtepMAC=%s gatewayMAC=%s", state.NodeName, vxlanPublicIP(cfg, state), vxlan.BridgeMAC, gatewayMAC)
-		workloads = newWorkloadManager(darwinNetwork, cfg.MackerBinary, state.NodeIP)
+		workloads = newWorkloadManagerWithState(darwinNetwork, cfg.MackerBinary, state.NodeIP, cfg.StateDir)
+		if err := workloads.loadJournal(); err != nil {
+			darwinNetwork.cleanup()
+			vxlan.cleanup()
+			return fmt.Errorf("load native workload journal: %w", err)
+		}
 		defer func() {
 			cleanupContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
@@ -2261,6 +2331,20 @@ func runJoin(cfg JoinConfig) error {
 	for {
 		select {
 		case <-ctx.Done():
+			drainContext, cancel := context.WithTimeout(context.Background(), cfg.DrainTimeout)
+			if node != nil {
+				if drainedNode, drainErr := setNodeShutdownCordon(drainContext, client, node, true); drainErr != nil {
+					log.Printf("warning: cordon Node before shutdown: %v", drainErr)
+				} else {
+					node = drainedNode
+				}
+			}
+			if workloads != nil {
+				if cleanupErr := workloads.cleanup(); cleanupErr != nil {
+					log.Printf("warning: drain native workloads: %v", cleanupErr)
+				}
+			}
+			cancel()
 			return nil
 		case <-ticker.C:
 			if darwinNetwork != nil && peerClient != nil {
@@ -2403,6 +2487,7 @@ func runJoinCommand(args []string) error {
 	flags.IntVar(&cfg.VXLANMTU, "vxlan-mtu", defaultVXLANMTU, "VXLAN bridge MTU")
 	flags.StringVar(&cfg.ClusterCIDR, "cluster-cidr", defaultClusterCIDR, "cluster Pod network CIDR routed through the Darwin VXLAN")
 	flags.StringVar(&cfg.ServiceCIDR, "service-cidr", defaultServiceCIDR, "Kubernetes Service network CIDR routed through the Darwin VXLAN")
+	flags.DurationVar(&cfg.DrainTimeout, "drain-timeout", defaultDrainTimeout, "maximum time for API cordon during graceful shutdown")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}

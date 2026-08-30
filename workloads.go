@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -22,26 +23,108 @@ const (
 
 type managedWorkload struct {
 	UID           string
+	Namespace     string
+	Name          string
 	ContainerName string
 	IP            string
 	RestartCount  int32
 	RetryAfter    time.Time
 }
 
+type workloadJournalRecord struct {
+	UID           string `json:"uid"`
+	Namespace     string `json:"namespace,omitempty"`
+	Name          string `json:"name,omitempty"`
+	ContainerName string `json:"containerName"`
+	IP            string `json:"ip,omitempty"`
+	RestartCount  int32  `json:"restartCount,omitempty"`
+}
+
+type workloadJournal struct {
+	Version   int                     `json:"version"`
+	Workloads []workloadJournalRecord `json:"workloads"`
+}
+
 type workloadManager struct {
 	network      *DarwinNetworkHandle
 	mackerBinary string
 	nodeIP       string
+	journalPath  string
 	workloads    map[string]*managedWorkload
 }
 
 func newWorkloadManager(network *DarwinNetworkHandle, mackerBinary, nodeIP string) *workloadManager {
+	return newWorkloadManagerWithState(network, mackerBinary, nodeIP, "")
+}
+
+func newWorkloadManagerWithState(network *DarwinNetworkHandle, mackerBinary, nodeIP, stateDir string) *workloadManager {
+	journalPath := ""
+	if stateDir != "" {
+		journalPath = filepath.Join(stateDir, "workloads.json")
+	}
 	return &workloadManager{
 		network:      network,
 		mackerBinary: mackerBinary,
 		nodeIP:       nodeIP,
+		journalPath:  journalPath,
 		workloads:    make(map[string]*managedWorkload),
 	}
+}
+
+func (m *workloadManager) loadJournal() error {
+	if m.journalPath == "" {
+		return nil
+	}
+	body, err := os.ReadFile(m.journalPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read workload journal: %w", err)
+	}
+	var journal workloadJournal
+	if err := json.Unmarshal(body, &journal); err != nil {
+		return fmt.Errorf("decode workload journal: %w", err)
+	}
+	if journal.Version != 1 {
+		return fmt.Errorf("unsupported workload journal version %d", journal.Version)
+	}
+	for _, record := range journal.Workloads {
+		if record.UID == "" || record.ContainerName == "" {
+			return errors.New("workload journal contains an incomplete record")
+		}
+		m.workloads[record.UID] = &managedWorkload{
+			UID:           record.UID,
+			Namespace:     record.Namespace,
+			Name:          record.Name,
+			ContainerName: record.ContainerName,
+			IP:            record.IP,
+			RestartCount:  record.RestartCount,
+		}
+	}
+	return nil
+}
+
+func (m *workloadManager) persistJournal() error {
+	if m.journalPath == "" {
+		return nil
+	}
+	records := make([]workloadJournalRecord, 0, len(m.workloads))
+	for _, workload := range m.workloads {
+		records = append(records, workloadJournalRecord{
+			UID: workload.UID, Namespace: workload.Namespace, Name: workload.Name,
+			ContainerName: workload.ContainerName, IP: workload.IP, RestartCount: workload.RestartCount,
+		})
+	}
+	sort.Slice(records, func(i, j int) bool { return records[i].UID < records[j].UID })
+	body, err := json.MarshalIndent(workloadJournal{Version: 1, Workloads: records}, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode workload journal: %w", err)
+	}
+	if err := writePrivateFile(m.journalPath, append(body, '\n'), 0600); err != nil {
+		return fmt.Errorf("write workload journal: %w", err)
+	}
+	return nil
 }
 
 func (m *workloadManager) mackerCommand(args ...string) (*exec.Cmd, error) {
@@ -566,18 +649,26 @@ func (m *workloadManager) reconcile(ctx context.Context, client *APIClient, pods
 			uid = pod.Metadata.Namespace + "/" + pod.Metadata.Name
 		}
 		if pod.Metadata.DeletionTimestamp != "" {
+			seen[uid] = true
 			workload := m.workloads[uid]
 			if workload == nil {
 				workload = &managedWorkload{
 					UID:           uid,
+					Namespace:     pod.Metadata.Namespace,
+					Name:          pod.Metadata.Name,
 					ContainerName: workloadContainerName(*pod),
 					IP:            pod.Status.PodIP,
 				}
 			}
 			if err := m.removeWorkload(workload); err != nil {
 				reconcileErrors = append(reconcileErrors, fmt.Errorf("remove deleted Pod %s/%s: %w", pod.Metadata.Namespace, pod.Metadata.Name, err))
+				m.workloads[uid] = workload
+				continue
 			}
 			delete(m.workloads, uid)
+			if err := m.persistJournal(); err != nil {
+				reconcileErrors = append(reconcileErrors, fmt.Errorf("persist deleted Pod %s/%s cleanup: %w", pod.Metadata.Namespace, pod.Metadata.Name, err))
+			}
 			continue
 		}
 		if !podHasNativeLabel(*pod) {
@@ -592,12 +683,26 @@ func (m *workloadManager) reconcile(ctx context.Context, client *APIClient, pods
 			continue
 		}
 		managed := m.workloads[uid]
+		journalChanged := false
 		if managed == nil {
 			managed = &managedWorkload{UID: uid, ContainerName: workloadContainerName(*pod)}
 			if existing := pod.Status.ContainerStatuses; len(existing) > 0 {
 				managed.RestartCount = existing[0].RestartCount
 			}
 			m.workloads[uid] = managed
+			journalChanged = true
+		}
+		if managed.Namespace != pod.Metadata.Namespace || managed.Name != pod.Metadata.Name {
+			managed.Namespace = pod.Metadata.Namespace
+			managed.Name = pod.Metadata.Name
+			journalChanged = true
+		}
+		if journalChanged {
+			if err := m.persistJournal(); err != nil {
+				reconcileErrors = append(reconcileErrors, fmt.Errorf("persist workload %s/%s ownership: %w", pod.Metadata.Namespace, pod.Metadata.Name, err))
+				managed.RetryAfter = time.Now().Add(workloadRetryDelay)
+				continue
+			}
 		}
 		ip := pod.Status.PodIP
 		if ip == "" {
@@ -621,7 +726,14 @@ func (m *workloadManager) reconcile(ctx context.Context, client *APIClient, pods
 				continue
 			}
 		}
-		managed.IP = ip
+		if managed.IP != ip {
+			managed.IP = ip
+			if err := m.persistJournal(); err != nil {
+				reconcileErrors = append(reconcileErrors, fmt.Errorf("persist workload %s/%s address: %w", pod.Metadata.Namespace, pod.Metadata.Name, err))
+				managed.RetryAfter = time.Now().Add(workloadRetryDelay)
+				continue
+			}
+		}
 		if err := m.network.addWorkloadIP(ip); err != nil {
 			reconcileErrors = append(reconcileErrors, fmt.Errorf("add address for Pod %s/%s: %w", pod.Metadata.Namespace, pod.Metadata.Name, err))
 			_ = m.updateStatus(ctx, client, pod, "Pending", ip, "MacletNetworkSetupFailed", err.Error(), false, managed.RestartCount)
@@ -676,6 +788,11 @@ func (m *workloadManager) reconcile(ctx context.Context, client *APIClient, pods
 					continue
 				}
 				managed.RestartCount++
+				if err := m.persistJournal(); err != nil {
+					reconcileErrors = append(reconcileErrors, fmt.Errorf("persist workload %s/%s restart: %w", pod.Metadata.Namespace, pod.Metadata.Name, err))
+					managed.RetryAfter = time.Now().Add(workloadRetryDelay)
+					continue
+				}
 			}
 		}
 		args, err := m.runArgs(*pod, pod.Spec.Containers[0], managed)
@@ -691,19 +808,37 @@ func (m *workloadManager) reconcile(ctx context.Context, client *APIClient, pods
 			_ = m.updateStatus(ctx, client, pod, "Pending", ip, "MacletMackerLaunchFailed", err.Error(), false, managed.RestartCount)
 			continue
 		}
+		if err := m.persistJournal(); err != nil {
+			if cleanupErr := m.removeWorkload(managed); cleanupErr != nil {
+				reconcileErrors = append(reconcileErrors, fmt.Errorf("persist workload %s/%s ownership: %w (cleanup: %v)", pod.Metadata.Namespace, pod.Metadata.Name, err, cleanupErr))
+			} else {
+				reconcileErrors = append(reconcileErrors, fmt.Errorf("persist workload %s/%s ownership: %w", pod.Metadata.Namespace, pod.Metadata.Name, err))
+			}
+			managed.RetryAfter = time.Now().Add(workloadRetryDelay)
+			_ = m.updateStatus(ctx, client, pod, "Pending", ip, "MacletOwnershipPersistFailed", err.Error(), false, managed.RestartCount)
+			continue
+		}
 		managed.RetryAfter = time.Time{}
 		if err := m.updateStatus(ctx, client, pod, "Running", ip, "MacletWorkloadRunning", "Macker started the trusted native workload", true, managed.RestartCount); err != nil {
 			reconcileErrors = append(reconcileErrors, err)
 		}
 	}
+	journalChanged := false
 	for uid, workload := range m.workloads {
 		if seen[uid] {
 			continue
 		}
 		if err := m.removeWorkload(workload); err != nil {
 			reconcileErrors = append(reconcileErrors, fmt.Errorf("remove stale maclet workload %s: %w", workload.ContainerName, err))
+			continue
 		}
 		delete(m.workloads, uid)
+		journalChanged = true
+	}
+	if journalChanged {
+		if err := m.persistJournal(); err != nil {
+			reconcileErrors = append(reconcileErrors, fmt.Errorf("persist stale workload cleanup: %w", err))
+		}
 	}
 	return errors.Join(reconcileErrors...)
 }
@@ -755,11 +890,19 @@ func (h *DarwinNetworkHandle) validateWorkloadAddress(ip string) error {
 
 func (m *workloadManager) cleanup() error {
 	var cleanupErrors []error
+	journalChanged := false
 	for uid, workload := range m.workloads {
 		if err := m.removeWorkload(workload); err != nil {
 			cleanupErrors = append(cleanupErrors, fmt.Errorf("cleanup workload %s: %w", uid, err))
+			continue
 		}
 		delete(m.workloads, uid)
+		journalChanged = true
+	}
+	if journalChanged || len(m.workloads) == 0 {
+		if err := m.persistJournal(); err != nil {
+			cleanupErrors = append(cleanupErrors, err)
+		}
 	}
 	return errors.Join(cleanupErrors...)
 }
