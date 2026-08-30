@@ -48,6 +48,7 @@ const (
 	defaultLeaseDurationSecs = 40
 	defaultHeartbeat         = 10 * time.Second
 	defaultDrainTimeout      = 10 * time.Second
+	defaultKubeletPort       = 10250
 )
 
 var errNotFound = errors.New("resource not found")
@@ -463,6 +464,9 @@ func loadPeerAPIClient(server, kubeconfigPath, contextName string, insecure bool
 	if len(certPEM) == 0 && token == "" && selectedUser.username == "" {
 		return nil, false, errors.New("peer kubeconfig user has no token, username/password, or client certificate")
 	}
+	if server == "" {
+		server = cluster.server
+	}
 	client, err := newAPIClientWithMaterial(server, caPEM, certPEM, keyPEM, insecure, selectedUser.username, selectedUser.password, token)
 	if err != nil {
 		return nil, false, fmt.Errorf("create peer API client: %w", err)
@@ -690,6 +694,9 @@ type LocalState struct {
 	CAFile         string `json:"caFile"`
 	ClientCert     string `json:"clientCert"`
 	ClientKey      string `json:"clientKey"`
+	ClientCA       string `json:"clientCA,omitempty"`
+	ServingCert    string `json:"servingCert,omitempty"`
+	ServingKey     string `json:"servingKey,omitempty"`
 	PasswordFile   string `json:"passwordFile"`
 }
 
@@ -951,6 +958,7 @@ func nodeStatus(name, nodeIP, externalIP string, now time.Time) NodeStatus {
 			{Type: "PIDPressure", Status: "False", LastHeartbeatTime: stamp, LastTransitionTime: stamp, Reason: "MacletHasSufficientPID", Message: "maclet does not report PID pressure"},
 			{Type: "Ready", Status: "True", LastHeartbeatTime: stamp, LastTransitionTime: stamp, Reason: "MacletReady", Message: "maclet is supervising trusted native Darwin workloads"},
 		},
+		DaemonEndpoints: map[string]any{"kubeletEndpoint": map[string]any{"Port": defaultKubeletPort}},
 		NodeInfo: NodeInfo{
 			Architecture:            "arm64",
 			OperatingSystem:         "darwin",
@@ -1183,6 +1191,93 @@ func generateClientCSR(nodeName string) (csrDER, keyPEM []byte, err error) {
 		pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}), nil
 }
 
+func certificateNeedsRefresh(path string) bool {
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return true
+	}
+	block, _ := pem.Decode(body)
+	if block == nil || block.Type != "CERTIFICATE" {
+		return true
+	}
+	certificate, err := x509.ParseCertificate(block.Bytes)
+	return err != nil || time.Now().Add(time.Hour).After(certificate.NotAfter)
+}
+
+func validPEMCertificate(body []byte) bool {
+	block, _ := pem.Decode(body)
+	if block == nil || block.Type != "CERTIFICATE" {
+		return false
+	}
+	_, err := x509.ParseCertificate(block.Bytes)
+	return err == nil
+}
+
+func writeLocalState(path string, state *LocalState) error {
+	body, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		return err
+	}
+	return writePrivateFile(path, append(body, '\n'), 0600)
+}
+
+func ensureKubeletServerMaterial(ctx context.Context, client *APIClient, state *LocalState, statePath, nodeName, nodeIP string) error {
+	stateDir := filepath.Dir(statePath)
+	if state.ClientCA == "" {
+		state.ClientCA = filepath.Join(stateDir, "client-ca.crt")
+	}
+	if state.ServingCert == "" {
+		state.ServingCert = filepath.Join(stateDir, "serving-kubelet.crt")
+	}
+	if state.ServingKey == "" {
+		state.ServingKey = filepath.Join(stateDir, "serving-kubelet.key")
+	}
+	clientCA, err := os.ReadFile(state.ClientCA)
+	if err != nil || !validPEMCertificate(clientCA) {
+		clientCA, err = client.get(ctx, "/v1-k3s/client-ca.crt")
+		if err != nil {
+			return fmt.Errorf("retrieve kubelet client CA: %w", err)
+		}
+		if !validPEMCertificate(clientCA) {
+			return errors.New("k3s returned an invalid kubelet client CA")
+		}
+		if err := writePrivateFile(state.ClientCA, clientCA, 0600); err != nil {
+			return err
+		}
+	}
+	if certificateNeedsRefresh(state.ServingCert) || func() bool { _, err := os.Stat(state.ServingKey); return err != nil }() {
+		csrDER, keyPEM, err := generateClientCSR(nodeName)
+		if err != nil {
+			return fmt.Errorf("generate kubelet serving certificate key: %w", err)
+		}
+		passwordBody, err := os.ReadFile(state.PasswordFile)
+		if err != nil {
+			return fmt.Errorf("read node password: %w", err)
+		}
+		headers := map[string]string{
+			"k3s-Node-Name":     nodeName,
+			"k3s-Node-Password": strings.TrimSpace(string(passwordBody)),
+		}
+		if nodeIP != "" {
+			headers["k3s-Node-IP"] = nodeIP
+		}
+		certPEM, err := client.do(ctx, http.MethodPost, "/v1-k3s/serving-kubelet.crt", csrDER, "application/pkcs10", headers)
+		if err != nil {
+			return fmt.Errorf("request kubelet serving certificate: %w", err)
+		}
+		if !validPEMCertificate(certPEM) {
+			return errors.New("k3s returned an invalid kubelet serving certificate")
+		}
+		if err := writePrivateFile(state.ServingKey, keyPEM, 0600); err != nil {
+			return err
+		}
+		if err := writePrivateFile(state.ServingCert, certPEM, 0600); err != nil {
+			return err
+		}
+	}
+	return writeLocalState(statePath, state)
+}
+
 func bootstrap(ctx context.Context, cfg JoinConfig) (*LocalState, *APIClient, error) {
 	if err := os.MkdirAll(cfg.StateDir, 0700); err != nil {
 		return nil, nil, fmt.Errorf("create state directory: %w", err)
@@ -1204,6 +1299,9 @@ func bootstrap(ctx context.Context, cfg JoinConfig) (*LocalState, *APIClient, er
 		}
 		client, err := newAPIClient(state.Server, mustReadFile(state.CAFile), state.ClientCert, state.ClientKey, cfg.InsecureSkipTLSVerify, "", "")
 		if err != nil {
+			return nil, nil, err
+		}
+		if err := ensureKubeletServerMaterial(ctx, client, &state, statePath, state.NodeName, state.NodeIP); err != nil {
 			return nil, nil, err
 		}
 		return &state, client, nil
@@ -1302,12 +1400,15 @@ func bootstrap(ctx context.Context, cfg JoinConfig) (*LocalState, *APIClient, er
 			}
 		}
 	}
-	state := &LocalState{Version: 1, Server: cfg.Server, NodeName: cfg.NodeName, NodeIP: cfg.NodeIP, ExternalIP: cfg.ExternalIP, PeerKubeconfig: peerKubeconfig, PeerContext: cfg.PeerContext, CAFile: caFile, ClientCert: certFile, ClientKey: keyFile, PasswordFile: passwordFile}
-	stateBody, err := json.MarshalIndent(state, "", "  ")
-	if err != nil {
-		return nil, nil, err
+	state := &LocalState{
+		Version: 1, Server: cfg.Server, NodeName: cfg.NodeName, NodeIP: cfg.NodeIP, ExternalIP: cfg.ExternalIP,
+		PeerKubeconfig: peerKubeconfig, PeerContext: cfg.PeerContext,
+		CAFile: caFile, ClientCert: certFile, ClientKey: keyFile, PasswordFile: passwordFile,
+		ClientCA:    filepath.Join(cfg.StateDir, "client-ca.crt"),
+		ServingCert: filepath.Join(cfg.StateDir, "serving-kubelet.crt"),
+		ServingKey:  filepath.Join(cfg.StateDir, "serving-kubelet.key"),
 	}
-	if err := writePrivateFile(statePath, append(stateBody, '\n'), 0600); err != nil {
+	if err := ensureKubeletServerMaterial(ctx, bootstrapClient, state, statePath, cfg.NodeName, cfg.NodeIP); err != nil {
 		return nil, nil, err
 	}
 	client, err := newAPIClient(state.Server, caPEM, state.ClientCert, state.ClientKey, cfg.InsecureSkipTLSVerify, "", "")
@@ -2166,6 +2267,15 @@ func (h *DarwinNetworkHandle) setGatewayMAC(mac string) error {
 
 func (h *DarwinNetworkHandle) cleanup() error {
 	var cleanupErrors []error
+	if _, err := net.InterfaceByName(h.Interface); err != nil {
+		// vmnet can tear down the bridge before maclet's deferred cleanup runs.
+		// Once the interface is gone, its aliases, routes, and scoped ARP entries
+		// are gone with it; do not turn that normal shutdown race into a warning.
+		h.Aliases = nil
+		h.Routes = nil
+		h.ARPs = nil
+		return nil
+	}
 	for i := len(h.Aliases) - 1; i >= 0; i-- {
 		if err := h.removeWorkloadIP(h.Aliases[i]); err != nil {
 			cleanupErrors = append(cleanupErrors, err)
@@ -2332,6 +2442,31 @@ func runJoin(cfg JoinConfig) error {
 			}
 			vxlan.cleanup()
 		}()
+	}
+	if !cfg.Once && workloads != nil {
+		kubelet, kubeletErr := startKubeletServer(ctx, state.NodeIP, workloads, state.ServingCert, state.ServingKey, state.ClientCA, defaultKubeletPort)
+		if kubeletErr != nil {
+			return kubeletErr
+		}
+		defer func() {
+			if err := kubelet.Close(); err != nil {
+				log.Printf("warning: close kubelet HTTPS server: %v", err)
+			}
+		}()
+		tunnelServers := discoverKubeletTunnelServers(ctx, client, state.Server)
+		connectedTunnels := 0
+		for _, tunnelServer := range tunnelServers {
+			tunnel, tunnelErr := startKubeletTunnel(ctx, tunnelServer, state.NodeIP, state.ClientCert, state.ClientKey, state.CAFile, defaultKubeletPort)
+			if tunnelErr != nil {
+				log.Printf("warning: kubelet tunnel to %s unavailable: %v", tunnelServer, tunnelErr)
+				continue
+			}
+			connectedTunnels++
+			defer tunnel.Close()
+		}
+		if connectedTunnels == 0 {
+			return errors.New("no Kubernetes API server accepted a kubelet remotedialer tunnel")
+		}
 	}
 	node, err = updateNodeStatus(ctx, client, node, state.NodeIP, cfg.ExternalIP)
 	if err != nil {

@@ -303,6 +303,23 @@ binaries retain the previous status-only fallback. Supply `--macker-binary` to
 `join` when Macker is not on `PATH`; image layouts must already be available in
 Macker's image store.
 
+When VXLAN and Macker are enabled, maclet also serves the kubelet HTTPS
+endpoint on the Node IP and port 10250 using the K3s-issued serving and client
+CA certificates. This makes the standard commands work for managed native
+Pods:
+
+```sh
+kubectl --context home-dev -n default logs -f POD -c CONTAINER
+kubectl --context home-dev -n default exec -it POD -c CONTAINER -- /bin/sh
+```
+
+Logs are streamed from Macker's detached log capture. Exec uses Kubernetes
+SPDY stream multiplexing and delegates each command to `macker exec`, with the
+Pod's environment and working directory configuration. This is still a
+trusted native process path: it does not provide a Linux namespace or PTY
+isolation boundary, and unsupported Pods are rejected by the workload
+reconciler.
+
 maclet persists ownership records in `<state-dir>/workloads.json` before
 starting a native workload. On startup it reconciles those records against
 Pods and Macker, removing owned containers and Pod IP aliases whose Pods no

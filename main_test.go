@@ -234,6 +234,16 @@ func TestFlannelAnnotations(t *testing.T) {
 	}
 }
 
+func TestDarwinNetworkCleanupIgnoresMissingInterface(t *testing.T) {
+	handle := &DarwinNetworkHandle{Interface: "definitely-not-a-real-maclet-interface", Aliases: []string{"10.42.8.3"}, Routes: []DarwinRoute{{Network: "10.42.0.0", Netmask: "255.255.0.0"}}, ARPs: []DarwinARPEntry{{IP: "10.42.8.2", MAC: "00:11:22:33:44:55"}}}
+	if err := handle.cleanup(); err != nil {
+		t.Fatalf("cleanup missing interface: %v", err)
+	}
+	if len(handle.Aliases) != 0 || len(handle.Routes) != 0 || len(handle.ARPs) != 0 {
+		t.Fatalf("cleanup state = %#v", handle)
+	}
+}
+
 func TestNodeStatusIncludesExternalIP(t *testing.T) {
 	status := nodeStatus("maclet", "192.168.137.111", "192.168.137.111", time.Unix(0, 0))
 	if len(status.Addresses) != 3 {
@@ -244,6 +254,11 @@ func TestNodeStatusIncludesExternalIP(t *testing.T) {
 	}
 	if status.Capacity["pods"] != "110" || status.Allocatable["pods"] != "110" {
 		t.Errorf("pod capacity = %q/%q, want 110/110", status.Capacity["pods"], status.Allocatable["pods"])
+	}
+	endpoints, ok := status.DaemonEndpoints.(map[string]any)
+	endpoint, endpointOK := endpoints["kubeletEndpoint"].(map[string]any)
+	if !ok || !endpointOK || endpoint["Port"] != defaultKubeletPort {
+		t.Fatalf("daemon endpoints = %#v", status.DaemonEndpoints)
 	}
 }
 
