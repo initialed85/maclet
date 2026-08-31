@@ -1,10 +1,10 @@
 # maclet
 
 `maclet` is an experimental Darwin/Apple Silicon Kubernetes node agent. Its
-purpose is to let a macOS host participate in a K3s cluster before there is a
-full Darwin runtime or container implementation.
+purpose is to let a macOS host participate in a K3s cluster and run selected
+native workloads before there is a full Darwin container implementation.
 
-The first milestone is deliberately small:
+Current capabilities include:
 
 - authenticate to K3s with the cluster join token;
 - obtain a node client certificate from K3s;
@@ -17,13 +17,14 @@ The first milestone is deliberately small:
 - run explicitly opted-in single-container Pods through Macker as trusted
   native processes on direct PodCIDR address aliases;
 - configure macOS's `cluster.local` resolver to use the cluster's CoreDNS
-  Service;
+  Service when VXLAN and peer credentials are available;
 - print pods assigned to the node as JSON.
 
-This is **not** a secure container runtime. It does not provide kubelet,
-containerd, Linux namespaces, or CNI isolation. Macker supervises supported
-Pods as ordinary host processes. The node is intentionally tainted so the
-scheduler will not place ordinary workloads on it:
+This is **not** a secure container runtime or a full kubelet/CRI
+implementation. It does not provide containerd, Linux namespaces, chroot
+isolation, or CNI isolation. Macker supervises supported Pods as ordinary host
+processes. The node is intentionally tainted so the scheduler will not place
+ordinary workloads on it:
 
 ```text
 label: kubernetes.io/os=darwin
@@ -40,9 +41,11 @@ go vet ./...
 go build -o maclet .
 ```
 
-The root `main.go` is a small executable wrapper around the implementation in
-`pkg/maclet`; `pkg/kube` owns the narrow HTTPS transport and aliases the
-upstream Kubernetes API objects (`core/v1`, `coordination/v1`, and
+See [`ARCHITECTURE.md`](ARCHITECTURE.md) for the process, API, networking, DNS,
+and workload-reconciliation overview. The root `main.go` is a small executable
+wrapper around the implementation in `pkg/maclet`; `pkg/kube` owns the narrow
+HTTPS transport and aliases the upstream Kubernetes API objects (`core/v1`,
+`coordination/v1`, and
 `metav1`). maclet still uses a deliberately small HTTP surface rather than
 client-go. When automatic VXLAN peer discovery is enabled, it invokes the
 locally installed `kubectl` only to load the selected kubeconfig as JSON; a
@@ -112,12 +115,15 @@ On first join maclet:
    reads the selected Linux Flannel gateway MAC through the peer kubeconfig,
    installs local Pod/Service routes, and publishes the Flannel Node
    annotations;
-6. updates the Node status and creates the matching `kube-node-lease` Lease.
+6. for a long-running VXLAN join, discovers the `kube-dns` Service through
+   the peer client and configures `/etc/resolver/cluster.local`;
+7. updates the Node status and creates the matching `kube-node-lease` Lease.
 
 The client key, certificate, CA, node password, and state metadata are stored
 under the state directory with restrictive permissions. The join token is not
-stored after bootstrap. The peer kubeconfig is not copied into state; only its path and optional
-context are persisted. When VXLAN is enabled, maclet uses `kubectl config view`
+stored after bootstrap. The peer kubeconfig is not copied into state; only its
+path and optional context are persisted. When VXLAN is enabled, maclet uses
+`kubectl config view`
 with `$KUBECONFIG` or `~/.kube/config` by default to list peer Nodes and read
 their Flannel annotations. Prefer a dedicated least-privilege kubeconfig
 rather than an administrator kubeconfig for production use. `kubectl` must be
@@ -298,10 +304,10 @@ enabled and can find Macker. maclet advertises capacity for up to 110 Pods so
 the Kubernetes scheduler can place workloads; this is a scheduling hint, not a
 hard process or resource limit. maclet currently supports one container per
 Pod, uses the PodCIDR's `.1` bridge address and `.2` synthetic gateway as
-reserved addresses, and allocates workload aliases from `.3` upward. Since
-native processes share the host network stack, so workloads that cannot
-consume a dynamic port must avoid overlap (`maxSurge: 0`, `maxUnavailable: 1`)
-and opt out of PF remapping. Workloads whose image honors `MACKER_PORT_N`
+reserved addresses, and allocates workload aliases from `.3` upward.
+Native processes share the host network stack. Workloads that cannot consume
+a dynamic port must avoid overlap (`maxSurge: 0`, `maxUnavailable: 1`) and opt
+out of PF remapping. Workloads whose image honors `MACKER_PORT_N`
 use per-Pod PF remapping by default, allowing normal overlapping rollouts;
 set the `k8s-darwin.dev/disable-port-forward: "true"` Pod-template annotation
 only for the direct-port fallback. It invokes:
@@ -351,11 +357,13 @@ Pods:
 
 ```sh
 kubectl --context home-dev -n default logs -f POD -c CONTAINER
-kubectl --context home-dev -n default exec -it POD -c CONTAINER -- /bin/sh
+kubectl --context home-dev -n default exec -it POD -c CONTAINER -- EXECUTABLE ARGS...
 ```
 
-Logs are streamed from Macker's detached log capture. Exec uses Kubernetes
-SPDY stream multiplexing and delegates each command to `macker exec`, with the
+`EXECUTABLE` must exist in the native image; macOS Darwin images are not
+required to contain `/bin/sh`. Logs are streamed from Macker's detached log
+capture. Exec uses Kubernetes SPDY stream multiplexing and delegates each
+command to `macker exec`, with the
 Pod's environment and working directory configuration. This is still a
 trusted native process path: it does not provide a Linux namespace or PTY
 isolation boundary, and unsupported Pods are rejected by the workload
@@ -491,10 +499,19 @@ CoreDNS ConfigMap for records: that ConfigMap contains the Corefile and static
 resolver is reconciled during startup and on each heartbeat in case the
 `kube-dns` ClusterIP changes.
 
-The resolver integration is enabled by default for long-running VXLAN joins.
-Use `--dns-resolver=false` to leave the host resolver untouched. maclet removes
-its managed resolver file during a clean shutdown and refuses to overwrite an
+The resolver integration is enabled by default for long-running VXLAN joins
+when a peer API client is available. If peer discovery credentials are missing,
+maclet logs a warning and continues without changing host DNS. Use
+`--dns-resolver=false` to leave the host resolver untouched. maclet removes its
+managed resolver file during a clean shutdown and refuses to overwrite an
 existing `/etc/resolver/cluster.local` file that was not created by maclet.
+Verify the active resolver and a cluster name with:
+
+```sh
+scutil --dns | grep -A4 -B2 cluster.local
+dscacheutil -q host -a name kubernetes.default.svc.cluster.local
+```
+
 Fully qualified names such as
 `my-service.my-namespace.svc.cluster.local` are the reliable form for native
 workloads; macOS does not receive each Kubernetes Pod's namespace-specific
@@ -504,28 +521,30 @@ workloads; macOS does not receive each Kubernetes Pod's namespace-specific
 
 Not implemented yet:
 
-- automatic cleanup after an unclean process kill;
+- complete automatic cleanup after an unclean process kill (network routes,
+  ARP state, or the VXLAN child may still require manual cleanup);
 - a native Darwin CNI implementation;
-- full kubelet-compatible Pod lifecycle semantics, including sidecars,
-  volume projection, image pulling, and exit-code reporting;
-- `/etc/hosts` fallback synchronization for runtimes that ignore macOS's
-  `/etc/resolver` mechanism;
+- full kubelet/CRI Pod lifecycle semantics, including sidecars, projected
+  volumes, image pulling, and CNI integration;
+- an `/etc/hosts` fallback for runtimes that ignore macOS's `/etc/resolver`
+  mechanism;
 - service proxying, Pod host-port mapping, or network policy;
 - workload event/watch output.
 
 The current network manager consumes the Node's assigned PodCIDR, coordinates
-single-peer Darwin VXLAN and host routes, allocates direct IP aliases, and
+multi-peer Darwin VXLAN and host routes, allocates direct IP aliases, and
 reconciles explicitly opted-in Pods through Macker. The reported container
 runtime is `macker://trusted-native`, reflecting that workloads are supervised
-by Macker rather than a Linux container runtime. `/etc/hosts` and richer native
-workload behavior can then be added without pretending that macOS provides
-Linux container isolation.
+by Macker rather than a Linux container runtime. The macOS resolver integration
+uses CoreDNS directly; it does not attempt to make native processes look like
+isolated Linux Pods.
 
 ## Removing the experiment node
 
 There is not yet a built-in `maclet leave` command. To fully unregister the
 experimental node, stop maclet first (normally with `Ctrl-C`) so its VXLAN
-child, routes, ARP entry, and Flannel annotations are cleaned up, then run:
+child, routes, ARP entries, resolver configuration, and Flannel annotations are
+cleaned up, then run:
 
 ```sh
 kubectl --context home-dev delete node maclet --ignore-not-found
