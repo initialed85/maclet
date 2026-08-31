@@ -52,17 +52,21 @@ func desiredPodStatus(pod Pod, nodeIP, phase, ip, reason, message string, runnin
 		status.PodIPs = []PodIP{{IP: ip}}
 	}
 	status.HostIP = nodeIP
-	status.Reason = reason
+	// PodStatus.reason is optional and has no Maclet-specific value. Leaving it
+	// empty lets clients and kubectl use the canonical Pod phase (Running,
+	// Pending, Succeeded, or Failed) for the top-level status. The native
+	// workload identity is already carried by the Pod label and annotations.
+	status.Reason = ""
 	status.Message = message
 	stamp := metav1.NewTime(time.Now().UTC())
 	ready := running && phase == "Running"
-	status.Conditions = setPodCondition(status.Conditions, PodCondition{Type: "PodScheduled", Status: "True", LastTransitionTime: stamp, Reason: "MacletAssigned", Message: "maclet assigned this trusted native workload"})
-	status.Conditions = setPodCondition(status.Conditions, PodCondition{Type: "Initialized", Status: "True", LastTransitionTime: stamp, Reason: "MacletInitialized", Message: "maclet initialized the native workload"})
-	readyReason := "MacletWorkloadNotRunning"
-	readyMessage := "the Macker workload is not running"
+	status.Conditions = setPodCondition(status.Conditions, PodCondition{Type: "PodScheduled", Status: "True", LastTransitionTime: stamp, Reason: "PodScheduled", Message: "Pod was successfully assigned to this node"})
+	status.Conditions = setPodCondition(status.Conditions, PodCondition{Type: "Initialized", Status: "True", LastTransitionTime: stamp, Reason: "PodInitialized", Message: "Pod initialization completed"})
+	readyReason := "ContainersNotReady"
+	readyMessage := "containers are not ready"
 	if ready {
-		readyReason = "MacletWorkloadRunning"
-		readyMessage = "the Macker workload is running"
+		readyReason = "ContainersReady"
+		readyMessage = "containers are ready"
 	}
 	readyStatus := corev1.ConditionFalse
 	if ready {
@@ -79,7 +83,11 @@ func desiredPodStatus(pod Pod, nodeIP, phase, ip, reason, message string, runnin
 	case running:
 		container.State.Running = &ContainerStateRunning{StartedAt: stamp}
 	case phase == "Succeeded" || phase == "Failed":
-		terminated := &ContainerStateTerminated{Reason: reason, Message: message, FinishedAt: stamp}
+		terminatedReason := "Error"
+		if phase == "Succeeded" {
+			terminatedReason = "Completed"
+		}
+		terminated := &ContainerStateTerminated{Reason: terminatedReason, Message: message, FinishedAt: stamp}
 		if inspection != nil {
 			if inspection.ExitCode != nil {
 				terminated.ExitCode = *inspection.ExitCode
@@ -105,7 +113,14 @@ func desiredPodStatus(pod Pod, nodeIP, phase, ip, reason, message string, runnin
 		}
 		container.State.Terminated = terminated
 	default:
-		container.State.Waiting = &ContainerStateWaiting{Reason: reason, Message: message}
+		waitingReason := "ContainerCreating"
+		switch reason {
+		case "MacletUnsupportedPod":
+			waitingReason = "CreateContainerConfigError"
+		case "MacletMackerLaunchFailed":
+			waitingReason = "RunContainerError"
+		}
+		container.State.Waiting = &ContainerStateWaiting{Reason: waitingReason, Message: message}
 	}
 	status.ContainerStatuses = []ContainerStatus{container}
 	return status

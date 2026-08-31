@@ -228,15 +228,36 @@ func TestMackerVolumeArgsRejectsSubPathEscape(t *testing.T) {
 func TestDesiredPodStatus(t *testing.T) {
 	pod := Pod{ObjectMeta: ObjectMeta{Name: "web", Namespace: "default"}, Spec: PodSpec{Containers: []ContainerSpec{{Name: "web", Image: "example/web:latest"}}}, Status: PodStatus{Phase: "Pending", Conditions: []PodCondition{{Type: "PodScheduled", Status: "False"}}}}
 	status := desiredPodStatus(pod, "192.168.137.111", "Running", "10.42.8.3", "MacletWorkloadRunning", "running", true, 2)
-	if status.Phase != "Running" || status.PodIP != "10.42.8.3" || status.HostIP != "192.168.137.111" {
+	if status.Phase != "Running" || status.Reason != "" || status.PodIP != "10.42.8.3" || status.HostIP != "192.168.137.111" {
 		t.Fatalf("status identity = %#v", status)
 	}
 	if len(status.ContainerStatuses) != 1 || !status.ContainerStatuses[0].Ready || status.ContainerStatuses[0].RestartCount != 2 {
+
 		t.Fatalf("container status = %#v", status.ContainerStatuses)
 	}
 	for _, condition := range status.Conditions {
-		if condition.Type == "PodScheduled" && condition.Status != "True" {
+		if condition.Type == "PodScheduled" && (condition.Status != "True" || condition.Reason != "PodScheduled") {
 			t.Fatalf("PodScheduled condition not updated: %#v", status.Conditions)
+		}
+		if (condition.Type == "Ready" || condition.Type == "ContainersReady") && (condition.Status != "True" || condition.Reason != "ContainersReady") {
+			t.Fatalf("ready condition not updated: %#v", status.Conditions)
+		}
+	}
+
+}
+
+func TestDesiredPodStatusUsesStandardPendingReasons(t *testing.T) {
+	pod := Pod{Spec: PodSpec{Containers: []ContainerSpec{{Name: "web", Image: "example/web:latest"}}}}
+	status := desiredPodStatus(pod, "192.168.137.111", "Pending", "10.42.8.3", "MacletUnsupportedPod", "unsupported configuration", false, 0)
+	if status.Reason != "" {
+		t.Fatalf("Pod status reason = %q, want empty", status.Reason)
+	}
+	if waiting := status.ContainerStatuses[0].State.Waiting; waiting == nil || waiting.Reason != "CreateContainerConfigError" {
+		t.Fatalf("waiting status = %#v", status.ContainerStatuses[0].State.Waiting)
+	}
+	for _, condition := range status.Conditions {
+		if (condition.Type == "Ready" || condition.Type == "ContainersReady") && (condition.Status != "False" || condition.Reason != "ContainersNotReady") {
+			t.Fatalf("not-ready condition = %#v", condition)
 		}
 	}
 }
@@ -255,7 +276,10 @@ func TestDesiredPodStatusIncludesMackerExit(t *testing.T) {
 		t.Fatalf("container statuses = %#v", status.ContainerStatuses)
 	}
 	terminated := status.ContainerStatuses[0].State.Terminated
-	if terminated == nil || terminated.ExitCode != 17 || !terminated.StartedAt.Time.Equal(started) || !terminated.FinishedAt.Time.Equal(finished) {
+	if status.Reason != "" {
+		t.Fatalf("Pod status reason = %q, want empty", status.Reason)
+	}
+	if terminated == nil || terminated.Reason != "Error" || terminated.ExitCode != 17 || !terminated.StartedAt.Time.Equal(started) || !terminated.FinishedAt.Time.Equal(finished) {
 		t.Fatalf("terminated status = %#v", terminated)
 	}
 	if !strings.Contains(terminated.Message, "exited-with-error") {
