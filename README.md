@@ -51,6 +51,16 @@ client-go. When automatic VXLAN peer discovery is enabled, it invokes the
 locally installed `kubectl` only to load the selected kubeconfig as JSON; a
 static `--vxlan-gateway-mac` override avoids that helper dependency.
 
+## CI and releases
+
+`.github/workflows/release.yml` uses a build-numbered release pattern.
+GitHub Actions runs the Go tests, vet, and
+lifecycle-script syntax check, then cross-compiles the root `maclet` executable
+for Darwin/arm64 with CGO disabled. It uploads a tarball and SHA-256 checksum
+as an artifact. Pushes to `master` and manual workflow runs also create a
+GitHub release tagged `build-N`, where `N` is the Actions run number; pull
+requests run the checks and build but do not publish a release.
+
 ## Join a K3s cluster
 
 The K3s API endpoint for the current home cluster is:
