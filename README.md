@@ -16,6 +16,8 @@ The first milestone is deliberately small:
   runtime identity;
 - run explicitly opted-in single-container Pods through Macker as trusted
   native processes on direct PodCIDR address aliases;
+- configure macOS's `cluster.local` resolver to use the cluster's CoreDNS
+  Service;
 - print pods assigned to the node as JSON.
 
 This is **not** a secure container runtime. It does not provide kubelet,
@@ -142,9 +144,9 @@ Node registration, API access, and workload inspection do not require root.
 VXLAN mode additionally mutates the host network and starts the vmnet-backed
 `darwin-vxlan` helper, so it needs root or passwordless `sudo -n`. If
 `sudo -n true` succeeds, maclet remains running as the normal user and wraps
-only `darwin-vxlan`, `arp`, and `route` operations with `sudo -n`. Otherwise,
-rerun the complete `join` command via `sudo`. The state remains under the
-invoking user's `~/.maclet` in either case.
+only `darwin-vxlan`, `arp`, `route`, and the macOS resolver helper with
+`sudo -n`. Otherwise, rerun the complete `join` command via `sudo`. The state
+remains under the invoking user's `~/.maclet` in either case.
 
 ## Inspect scheduled workloads
 
@@ -468,6 +470,36 @@ stale remote FDB state behind.
 Do not start another process that owns the same local UDP endpoint. VXLAN and
 route setup require root or equivalent macOS networking entitlements.
 
+## Cluster DNS on macOS
+
+When VXLAN is enabled, maclet discovers the `kube-dns` Service through the
+read-only peer Kubernetes client and configures the native macOS resolver at
+`/etc/resolver/cluster.local`. The resolver file points at the Service's
+ClusterIP, so macOS applications can use the real CoreDNS implementation rather
+than a flattened copy of its records:
+
+```text
+# Managed by maclet; do not edit.
+# Cluster DNS domain: cluster.local
+nameserver 10.43.0.10
+```
+
+This supports the full CoreDNS behavior, including Services, headless Service
+records, EndpointSlices, SRV records, and TTLs. maclet does not watch the
+CoreDNS ConfigMap for records: that ConfigMap contains the Corefile and static
+`NodeHosts` data, while CoreDNS watches Kubernetes resources itself. The
+resolver is reconciled during startup and on each heartbeat in case the
+`kube-dns` ClusterIP changes.
+
+The resolver integration is enabled by default for long-running VXLAN joins.
+Use `--dns-resolver=false` to leave the host resolver untouched. maclet removes
+its managed resolver file during a clean shutdown and refuses to overwrite an
+existing `/etc/resolver/cluster.local` file that was not created by maclet.
+Fully qualified names such as
+`my-service.my-namespace.svc.cluster.local` are the reliable form for native
+workloads; macOS does not receive each Kubernetes Pod's namespace-specific
+`resolv.conf` search list.
+
 ## Current boundaries and next steps
 
 Not implemented yet:
@@ -476,7 +508,8 @@ Not implemented yet:
 - a native Darwin CNI implementation;
 - full kubelet-compatible Pod lifecycle semantics, including sidecars,
   volume projection, image pulling, and exit-code reporting;
-- `/etc/hosts`/cluster DNS synchronization;
+- `/etc/hosts` fallback synchronization for runtimes that ignore macOS's
+  `/etc/resolver` mechanism;
 - service proxying, Pod host-port mapping, or network policy;
 - workload event/watch output.
 

@@ -65,6 +65,7 @@ func runJoinCommand(args []string) error {
 	flags.StringVar(&cfg.VXLANBinary, "vxlan-binary", "", "path to darwin-vxlan; start it after PodCIDR assignment")
 	flags.StringVar(&cfg.MackerBinary, "macker-binary", "", "path to Macker; start assigned native Pods through it (defaults to PATH)")
 	flags.BoolVar(&cfg.Debug, "debug", false, "log generated Macker invocations and native workload decisions (may include environment values)")
+	flags.BoolVar(&cfg.DNSResolver, "dns-resolver", true, "configure macOS /etc/resolver/cluster.local to use the cluster DNS Service")
 	flags.StringVar(&cfg.VXLANRemote, "vxlan-remote", "", "VXLAN remote underlay address")
 	flags.StringVar(&cfg.VXLANLocal, "vxlan-local", "", "VXLAN local underlay address (defaults to --node-ip)")
 	flags.StringVar(&cfg.VXLANGatewayMAC, "vxlan-gateway-mac", "", "static remote flannel.1 MAC override (normally discovered through --peer-kubeconfig)")
@@ -112,6 +113,8 @@ func Main(args []string) int {
 		err = runWorkloadsCommand(args[1:])
 	case "cleanup-controller":
 		err = cleanupControllerCommand(args[1:])
+	case "resolver-helper":
+		err = resolverHelperCommand(args[1:])
 	case "version":
 		fmt.Println(version)
 	case "help", "--help", "-h":

@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -94,6 +95,7 @@ func runJoin(cfg JoinConfig) error {
 	}
 	var darwinNetwork *DarwinNetworkHandle
 	var workloads *workloadManager
+	var dnsResolver *clusterDNSResolver
 	if vxlan != nil {
 		if gatewayMAC == "" {
 			gatewayMAC, err = remoteVtepMAC(ctx, client, cfg.VXLANRemote, cfg.VXLANGatewayMAC)
@@ -139,6 +141,29 @@ func runJoin(cfg JoinConfig) error {
 			}
 			vxlan.cleanup()
 		}()
+		if !cfg.Once && cfg.DNSResolver {
+			dnsResolver = newClusterDNSResolver(cfg.useSudo)
+			if peerClient == nil {
+				peerClient, err = peerAPIClient(cfg, state)
+				if err != nil {
+					log.Printf("warning: cluster DNS resolver unavailable: %v", err)
+				}
+			}
+			if peerClient != nil {
+				if resolverErr := dnsResolver.reconcile(ctx, peerClient); resolverErr != nil {
+					log.Printf("warning: configure cluster DNS resolver: %v", resolverErr)
+				} else {
+					log.Printf("configured macOS resolver %s for cluster DNS via %s", dnsResolver.path, strings.Join(dnsResolver.nameservers, ", "))
+				}
+			}
+			defer func() {
+				cleanupContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
+				if err := dnsResolver.cleanup(cleanupContext); err != nil {
+					log.Printf("warning: clean cluster DNS resolver: %v", err)
+				}
+			}()
+		}
 	}
 	var cleanupStaleNativePods func(context.Context, []Pod)
 	if !cfg.Once && workloads != nil {
@@ -235,6 +260,11 @@ func runJoin(cfg JoinConfig) error {
 			cancel()
 			return nil
 		case <-ticker.C:
+			if dnsResolver != nil && peerClient != nil {
+				if resolverErr := dnsResolver.reconcile(ctx, peerClient); resolverErr != nil {
+					log.Printf("warning: refresh cluster DNS resolver: %v", resolverErr)
+				}
+			}
 			if darwinNetwork != nil && peerClient != nil {
 				gatewayMAC, peerErr := remoteVtepMAC(ctx, peerClient, cfg.VXLANRemote, "")
 				if peerErr != nil {

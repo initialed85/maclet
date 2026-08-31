@@ -32,6 +32,7 @@ type JoinConfig struct {
 	VXLANBinary           string
 	MackerBinary          string
 	Debug                 bool
+	DNSResolver           bool
 	VXLANRemote           string
 	VXLANLocal            string
 	VXLANGatewayMAC       string
