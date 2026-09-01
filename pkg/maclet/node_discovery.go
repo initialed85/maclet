@@ -59,10 +59,12 @@ func peerAPIClient(cfg JoinConfig, state *LocalState) (*APIClient, error) {
 	// An explicitly supplied kubeconfig remains an escape hatch for clusters
 	// where the standard K3s controller certificate is unavailable. New joins
 	// use the controller certificate obtained with the join token instead.
-	if client, found, err := configuredPeerAPIClient(cfg, state); err != nil {
-		return nil, err
-	} else if found {
-		return client, nil
+	if cfg.PeerKubeconfig != "" {
+		if client, found, err := configuredPeerAPIClient(cfg, state); err != nil {
+			return nil, err
+		} else if found {
+			return client, nil
+		}
 	}
 
 	certFile := state.ControllerCert
@@ -83,6 +85,16 @@ func peerAPIClient(cfg JoinConfig, state *LocalState) (*APIClient, error) {
 			if err != nil {
 				return nil, fmt.Errorf("create K3s controller API client: %w", err)
 			}
+			return client, nil
+		}
+	}
+	// Older state versions may contain an automatically selected kubeconfig.
+	// Keep it as a compatibility fallback, but prefer the token-backed
+	// controller certificate whenever it is available.
+	if cfg.PeerKubeconfig == "" && state.PeerKubeconfig != "" {
+		if client, found, err := configuredPeerAPIClient(cfg, state); err != nil {
+			return nil, err
+		} else if found {
 			return client, nil
 		}
 	}

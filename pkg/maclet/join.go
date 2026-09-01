@@ -39,12 +39,6 @@ func runJoin(cfg JoinConfig) error {
 	if cfg.DrainTimeout <= 0 {
 		cfg.DrainTimeout = defaultDrainTimeout
 	}
-	if cfg.PeerKubeconfig == "" {
-		cfg.PeerKubeconfig = state.PeerKubeconfig
-	}
-	if cfg.PeerContext == "" {
-		cfg.PeerContext = state.PeerContext
-	}
 	node, err := ensureNode(ctx, client, state.NodeName, state.NodeIP)
 	if err != nil {
 		return err
