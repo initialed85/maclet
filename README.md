@@ -9,7 +9,7 @@ Current capabilities include:
 - authenticate to K3s with the cluster join token;
 - obtain a node client certificate from K3s;
 - create and maintain a Kubernetes `Node` object;
-- advertise `darwin`/`arm64` and report `Ready` heartbeats and Leases;
+- advertise `darwin`/`arm64`, CPU/memory capacity, and report `Ready` heartbeats and Leases;
 - retain the controller-assigned PodCIDR;
 - optionally participate in the K3s Flannel VXLAN network;
 - publish the node's InternalIP, ExternalIP, and `macker://trusted-native`
@@ -18,6 +18,7 @@ Current capabilities include:
   native processes on direct PodCIDR address aliases;
 - configure macOS's `cluster.local` resolver to use the cluster's CoreDNS
   Service when VXLAN and peer credentials are available;
+- expose kubelet resource metrics for `kubectl top nodes` and `kubectl top pods`;
 - print pods assigned to the node as JSON.
 
 This is **not** a secure container runtime or a full kubelet/CRI
@@ -379,7 +380,12 @@ kubectl --context home-dev -n default exec -it POD -c CONTAINER -- EXECUTABLE AR
 required to contain `/bin/sh`. Logs are streamed from Macker's detached log
 capture. Exec uses Kubernetes SPDY stream multiplexing and delegates each
 command to `macker exec`, with the
-Pod's environment and working directory configuration. This is still a
+Pod's environment and working directory configuration. Resource metrics are
+served from the same endpoint at `/metrics/resource`: node CPU/memory comes
+from macOS host statistics, while managed native Pods report the Macker
+launcher/process-tree CPU time and resident memory. With the cluster's
+metrics-server installed, the normal `kubectl top nodes` and `kubectl top pods`
+commands include the Darwin node and its managed Pods. This is still a
 trusted native process path: it does not provide a Linux namespace or PTY
 isolation boundary, and unsupported Pods are rejected by the workload
 reconciler.

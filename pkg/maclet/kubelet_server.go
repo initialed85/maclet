@@ -196,7 +196,7 @@ func startKubeletServer(ctx context.Context, bindAddress string, manager *worklo
 		return nil, fmt.Errorf("listen for kubelet HTTPS on %s: %w", net.JoinHostPort(bindAddress, strconv.Itoa(port)), err)
 	}
 	server := &http.Server{
-		Handler:           &kubeletHandler{manager: manager},
+		Handler:           &kubeletHandler{manager: manager, metrics: newResourceMetrics()},
 		ReadHeaderTimeout: 10 * time.Second,
 		TLSConfig: &tls.Config{
 			MinVersion:   tls.VersionTLS12,

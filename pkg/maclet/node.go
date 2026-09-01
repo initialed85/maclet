@@ -194,8 +194,20 @@ func nodeStatus(name, nodeIP, externalIP string, now time.Time) NodeStatus {
 		osImage = "macOS " + strings.TrimSpace(string(output))
 	}
 	podCapacity := *resource.NewQuantity(defaultMaxPods, resource.DecimalSI)
-	capacity := corev1.ResourceList{corev1.ResourcePods: podCapacity}
-	allocatable := corev1.ResourceList{corev1.ResourcePods: podCapacity}
+	cpuCapacity := *resource.NewMilliQuantity(int64(runtime.NumCPU())*1000, resource.DecimalSI)
+	capacity := corev1.ResourceList{
+		corev1.ResourceCPU:  cpuCapacity,
+		corev1.ResourcePods: podCapacity,
+	}
+	allocatable := corev1.ResourceList{
+		corev1.ResourceCPU:  cpuCapacity,
+		corev1.ResourcePods: podCapacity,
+	}
+	if memoryCapacity, err := hostMemoryCapacityBytes(); err == nil && memoryCapacity <= uint64(^uint64(0)>>1) {
+		memoryQuantity := *resource.NewQuantity(int64(memoryCapacity), resource.BinarySI)
+		capacity[corev1.ResourceMemory] = memoryQuantity
+		allocatable[corev1.ResourceMemory] = memoryQuantity
+	}
 	return NodeStatus{
 		Addresses:   addresses,
 		Capacity:    capacity,

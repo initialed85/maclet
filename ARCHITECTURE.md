@@ -251,6 +251,17 @@ This is protocol compatibility, not a security boundary. Commands execute as
 native child processes with the workload's host-level filesystem and network
 access.
 
+## Resource metrics
+
+The same HTTPS endpoint serves `/metrics/resource` for the cluster's
+metrics-server. The endpoint accepts the metrics-server's bearer-authenticated
+scrape and emits the kubelet resource metric families used by `kubectl top`.
+Node CPU time and working-set memory are derived from macOS host statistics;
+managed native Pods use the Macker launcher/process tree's CPU time and
+resident memory. The Node status advertises host CPU and memory capacity so
+`kubectl top nodes` can calculate percentages. Metrics are intentionally
+best-effort process statistics, not cgroup-enforced container accounting.
+
 ## Shutdown and cleanup
 
 On `SIGINT` or `SIGTERM`, maclet:

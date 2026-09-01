@@ -13,9 +13,18 @@ import (
 
 type kubeletHandler struct {
 	manager *workloadManager
+	metrics *resourceMetrics
 }
 
 func (h *kubeletHandler) ServeHTTP(response http.ResponseWriter, request *http.Request) {
+	if request.URL.Path == kubeletResourceMetricsPath {
+		if !kubeletRequestAuthenticated(request) {
+			http.Error(response, "kubelet authentication required", http.StatusUnauthorized)
+			return
+		}
+		h.serveResourceMetrics(response, request)
+		return
+	}
 	if request.TLS != nil && len(request.TLS.PeerCertificates) == 0 {
 		http.Error(response, "kubelet client certificate required", http.StatusUnauthorized)
 		return
@@ -28,6 +37,14 @@ func (h *kubeletHandler) ServeHTTP(response http.ResponseWriter, request *http.R
 	default:
 		http.NotFound(response, request)
 	}
+}
+
+func kubeletRequestAuthenticated(request *http.Request) bool {
+	if request.TLS != nil && len(request.TLS.PeerCertificates) != 0 {
+		return true
+	}
+	authorization := strings.TrimSpace(request.Header.Get("Authorization"))
+	return len(authorization) >= len("Bearer ") && strings.EqualFold(authorization[:len("Bearer ")], "Bearer ") && strings.TrimSpace(authorization[len("Bearer "):]) != ""
 }
 
 func kubeletPathParts(path, prefix string) (namespace, podName, containerName string, ok bool) {
