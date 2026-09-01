@@ -47,7 +47,7 @@ func bootstrap(ctx context.Context, cfg JoinConfig) (*LocalState, *APIClient, er
 		return nil, nil, errors.New("--server is required for first join")
 	}
 	if cfg.NodeName == "" {
-		cfg.NodeName = defaultNodeName
+		cfg.NodeName = defaultNodeName()
 	}
 	token, err := readToken(cfg.Token, cfg.TokenFile)
 	if err != nil {

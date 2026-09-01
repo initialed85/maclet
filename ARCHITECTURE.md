@@ -83,7 +83,11 @@ these responsibilities:
 - drains workloads and cleans up owned state during graceful shutdown.
 
 The daemon runs as the invoking user whenever passwordless `sudo -n` is
-available. Only operations that need host privileges are elevated:
+available. On a new state directory, its default Node name is derived from the
+local macOS hostname and normalized to a Kubernetes-compatible DNS name. An
+explicit `--node-name` overrides that value; when existing state is reused,
+the persisted Node name is retained and an explicit name must match it. Only
+operations that need host privileges are elevated:
 
 - `darwin-vxlan` startup;
 - route, ARP, and address operations; and
@@ -142,18 +146,20 @@ Nodes or delete Pods.
 ## Join and bootstrap sequence
 
 1. Read a K3s token from `--token`, `--token-file`, or stdin.
-2. Fetch `/cacerts` and validate the token's CA hash.
-3. Authenticate to K3s agent endpoints using HTTP Basic auth as user `node`.
-4. Generate or reuse the persisted per-node password and client key material.
-5. Request a K3s client-kubelet certificate and persist the resulting state.
-6. Create or reconcile the Darwin/arm64 Node and retain its assigned PodCIDR.
-7. Start the VXLAN transport, install Darwin routes/ARP state, and publish
+2. Choose the explicit `--node-name`, the persisted state name, or a
+   Kubernetes-compatible form of the local hostname.
+3. Fetch `/cacerts` and validate the token's CA hash.
+4. Authenticate to K3s agent endpoints using HTTP Basic auth as user `node`.
+5. Generate or reuse the persisted per-node password and client key material.
+6. Request a K3s client-kubelet certificate and persist the resulting state.
+7. Create or reconcile the Darwin/arm64 Node and retain its assigned PodCIDR.
+8. Start the VXLAN transport, install Darwin routes/ARP state, and publish
    Flannel annotations.
-8. Discover the `kube-dns` Service and install the macOS resolver file when
+9. Discover the `kube-dns` Service and install the macOS resolver file when
    resolver integration is enabled.
-9. Start the kubelet HTTPS endpoint and one remotedialer tunnel per discovered
-   K3s API server.
-10. Begin the ten-second Node/Lease/Pod/network reconciliation loop.
+10. Start the kubelet HTTPS endpoint and one remotedialer tunnel per discovered
+    K3s API server.
+11. Begin the ten-second Node/Lease/Pod/network reconciliation loop.
 
 A subsequent join must reuse the original state directory. K3s stores only a
 hash of the node password, so deleting local state without deleting the

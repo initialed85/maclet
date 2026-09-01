@@ -90,11 +90,16 @@ Then start the long-running node heartbeat process:
   --node-ip 192.168.137.111
 ```
 
-`--node-ip` is the address advertised as the node's `InternalIP`. If omitted,
-maclet chooses the local address used to reach the API server. `--external-ip`
-controls the Kubernetes `ExternalIP` address and defaults to `--vxlan-local` or
-`--node-ip`; it is also useful for making the node's externally reachable
-underlay address visible in `kubectl get nodes -o wide`. The Flannel
+`--node-name` is optional. For a new state directory, maclet derives a
+Kubernetes-compatible DNS name from the Mac's local hostname, lowercasing it
+and normalizing characters that are not valid in a Node name. When reusing
+existing state, maclet uses the persisted Node name; an explicitly supplied
+name must match it. This follows K3s's hostname-based default while keeping the
+result valid for Kubernetes. `--node-ip` is the address advertised as the
+node's `InternalIP`. If omitted, maclet chooses the local address used to reach
+the API server. `--external-ip` controls the Kubernetes `ExternalIP` address
+and defaults to `--vxlan-local` or `--node-ip`; it is also useful for exposing
+the node's underlay address in `kubectl get nodes -o wide`. The Flannel
 `public-ip` annotation is the address that actually drives VXLAN peer setup.
 The default state directory is `~/.maclet`; use `--state-dir` to override it.
 When run through `sudo`, maclet keeps this path anchored to the invoking user's

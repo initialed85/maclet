@@ -14,7 +14,7 @@ import (
 const (
 	version                  = "0.1.0-dev"
 	defaultStateDir          = ".maclet"
-	defaultNodeName          = "maclet"
+	fallbackNodeName         = "maclet"
 	defaultVXLANPort         = 8472
 	defaultVXLANMTU          = 1450
 	defaultClusterCIDR       = "10.42.0.0/16"
@@ -56,7 +56,7 @@ func runJoinCommand(args []string) error {
 	flags.StringVar(&cfg.Server, "server", "", "Kubernetes/K3s API URL (https://host:6443)")
 	flags.StringVar(&cfg.Token, "token", "", "K3s join token (prefer --token-file to avoid process listings)")
 	flags.StringVar(&cfg.TokenFile, "token-file", "", "read K3s join token from this file, or - for stdin")
-	flags.StringVar(&cfg.NodeName, "node-name", defaultNodeName, "Kubernetes node name")
+	flags.StringVar(&cfg.NodeName, "node-name", "", "Kubernetes node name (defaults to the local hostname)")
 	flags.StringVar(&cfg.NodeIP, "node-ip", "", "node/underlay IP advertised to Kubernetes (auto-detected if empty)")
 	flags.StringVar(&cfg.ExternalIP, "external-ip", "", "Kubernetes ExternalIP address (defaults to --vxlan-local or --node-ip)")
 	flags.StringVar(&cfg.StateDir, "state-dir", defaultStatePath(), "maclet state directory")
