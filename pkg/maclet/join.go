@@ -36,6 +36,12 @@ func runJoin(cfg JoinConfig) error {
 			cfg.ExternalIP = vxlanPublicIP(cfg, state)
 		}
 	}
+	if !cfg.clusterCIDRSet && (cfg.ClusterCIDR == "" || cfg.ClusterCIDR == defaultClusterCIDR) && state.ClusterCIDR != "" {
+		cfg.ClusterCIDR = state.ClusterCIDR
+	}
+	if !cfg.serviceCIDRSet && (cfg.ServiceCIDR == "" || cfg.ServiceCIDR == defaultServiceCIDR) && state.ServiceCIDR != "" {
+		cfg.ServiceCIDR = state.ServiceCIDR
+	}
 	if cfg.DrainTimeout <= 0 {
 		cfg.DrainTimeout = defaultDrainTimeout
 	}
@@ -137,7 +143,7 @@ func runJoin(cfg JoinConfig) error {
 			vxlan.cleanup()
 		}()
 		if !cfg.Once && cfg.DNSResolver {
-			dnsResolver = newClusterDNSResolver(cfg.useSudo)
+			dnsResolver = newClusterDNSResolver(cfg.useSudo, state.ClusterDNS...)
 			resolverErr := dnsResolver.reconcile(ctx, client)
 			if resolverErr != nil && cleanupClient != nil {
 				resolverErr = dnsResolver.reconcile(ctx, cleanupClient)

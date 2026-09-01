@@ -23,25 +23,30 @@ const (
 )
 
 type clusterDNSResolver struct {
-	path        string
-	domain      string
-	useSudo     bool
-	nameservers []string
-	owned       bool
+	path                string
+	domain              string
+	useSudo             bool
+	nameservers         []string
+	fallbackNameservers []string
+	owned               bool
 }
 
-func newClusterDNSResolver(useSudo bool) *clusterDNSResolver {
+func newClusterDNSResolver(useSudo bool, fallbackNameservers ...string) *clusterDNSResolver {
 	return &clusterDNSResolver{
-		path:    defaultResolverPath,
-		domain:  defaultResolverDomain,
-		useSudo: useSudo,
+		path:                defaultResolverPath,
+		domain:              defaultResolverDomain,
+		useSudo:             useSudo,
+		fallbackNameservers: validNameservers(fallbackNameservers),
 	}
 }
 
 func (r *clusterDNSResolver) reconcile(ctx context.Context, client *APIClient) error {
 	nameservers, err := discoverClusterDNSNameservers(ctx, client)
 	if err != nil {
-		return err
+		nameservers = append([]string(nil), r.fallbackNameservers...)
+		if len(nameservers) == 0 {
+			return err
+		}
 	}
 	if sameStrings(r.nameservers, nameservers) && r.owned {
 		matches, matchErr := managedResolverFileMatches(r.path, r.domain, nameservers)
@@ -83,6 +88,21 @@ func (r *clusterDNSResolver) cleanup(ctx context.Context) error {
 	return nil
 }
 
+func validNameservers(candidates []string) []string {
+	nameservers := make([]string, 0, len(candidates))
+	seen := make(map[string]bool, len(candidates))
+	for _, candidate := range candidates {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "" || net.ParseIP(candidate) == nil || seen[candidate] {
+			continue
+		}
+		seen[candidate] = true
+		nameservers = append(nameservers, candidate)
+	}
+	sort.Strings(nameservers)
+	return nameservers
+}
+
 func discoverClusterDNSNameservers(ctx context.Context, client *APIClient) ([]string, error) {
 	if client == nil {
 		return nil, errors.New("cluster DNS discovery requires a peer Kubernetes client")
@@ -100,20 +120,10 @@ func discoverClusterDNSNameservers(ctx context.Context, client *APIClient) ([]st
 	if len(candidates) == 0 && service.Spec.ClusterIP != "" {
 		candidates = []string{service.Spec.ClusterIP}
 	}
-	nameservers := make([]string, 0, len(candidates))
-	seen := make(map[string]bool)
-	for _, candidate := range candidates {
-		candidate = strings.TrimSpace(candidate)
-		if candidate == "" || candidate == "None" || net.ParseIP(candidate) == nil || seen[candidate] {
-			continue
-		}
-		seen[candidate] = true
-		nameservers = append(nameservers, candidate)
-	}
+	nameservers := validNameservers(candidates)
 	if len(nameservers) == 0 {
 		return nil, fmt.Errorf("cluster DNS Service %s/%s has no usable ClusterIP", defaultClusterDNSNamespace, defaultClusterDNSService)
 	}
-	sort.Strings(nameservers)
 	return nameservers, nil
 }
 

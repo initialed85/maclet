@@ -39,6 +39,29 @@ func TestDiscoverClusterDNSNameservers(t *testing.T) {
 	}
 }
 
+func TestClusterDNSResolverUsesConfigFallback(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.WriteHeader(http.StatusForbidden)
+	}))
+	defer server.Close()
+	client, err := newAPIClient(server.URL, nil, "", "", true, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolver := newClusterDNSResolver(false, "10.43.0.11", "invalid", "10.43.0.10")
+	resolver.path = filepath.Join(t.TempDir(), "resolver", "cluster.local")
+	if err := resolver.reconcile(context.Background(), client); err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(resolver.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), "nameserver 10.43.0.10\n") || !strings.Contains(string(body), "nameserver 10.43.0.11\n") {
+		t.Fatalf("resolver content = %q", body)
+	}
+}
+
 func TestManagedResolverFileLifecycle(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "resolver", "cluster.local")
 	if err := writeManagedResolverFile(path, "cluster.local", []string{"10.43.0.10"}); err != nil {

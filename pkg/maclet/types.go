@@ -3,22 +3,25 @@ package maclet
 import "time"
 
 type LocalState struct {
-	Version        int    `json:"version"`
-	Server         string `json:"server"`
-	NodeName       string `json:"nodeName"`
-	NodeIP         string `json:"nodeIP"`
-	ExternalIP     string `json:"externalIP,omitempty"`
-	PeerKubeconfig string `json:"peerKubeconfig,omitempty"`
-	PeerContext    string `json:"peerContext,omitempty"`
-	CAFile         string `json:"caFile"`
-	ClientCert     string `json:"clientCert"`
-	ClientKey      string `json:"clientKey"`
-	ClientCA       string `json:"clientCA,omitempty"`
-	ControllerCert string `json:"controllerCert,omitempty"`
-	ControllerKey  string `json:"controllerKey,omitempty"`
-	ServingCert    string `json:"servingCert,omitempty"`
-	ServingKey     string `json:"servingKey,omitempty"`
-	PasswordFile   string `json:"passwordFile"`
+	Version        int      `json:"version"`
+	Server         string   `json:"server"`
+	NodeName       string   `json:"nodeName"`
+	NodeIP         string   `json:"nodeIP"`
+	ExternalIP     string   `json:"externalIP,omitempty"`
+	PeerKubeconfig string   `json:"peerKubeconfig,omitempty"`
+	PeerContext    string   `json:"peerContext,omitempty"`
+	CAFile         string   `json:"caFile"`
+	ClientCert     string   `json:"clientCert"`
+	ClientKey      string   `json:"clientKey"`
+	ClientCA       string   `json:"clientCA,omitempty"`
+	ControllerCert string   `json:"controllerCert,omitempty"`
+	ControllerKey  string   `json:"controllerKey,omitempty"`
+	ClusterCIDR    string   `json:"clusterCIDR,omitempty"`
+	ServiceCIDR    string   `json:"serviceCIDR,omitempty"`
+	ClusterDNS     []string `json:"clusterDNS,omitempty"`
+	ServingCert    string   `json:"servingCert,omitempty"`
+	ServingKey     string   `json:"servingKey,omitempty"`
+	PasswordFile   string   `json:"passwordFile"`
 }
 
 type JoinConfig struct {
@@ -45,6 +48,8 @@ type JoinConfig struct {
 	VXLANMTU              int
 	ClusterCIDR           string
 	ServiceCIDR           string
+	clusterCIDRSet        bool
+	serviceCIDRSet        bool
 	useSudo               bool
 }
 

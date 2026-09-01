@@ -159,18 +159,21 @@ Pod-delete permission.
    Kubernetes-compatible form of the local hostname.
 3. Fetch `/cacerts` and validate the token's CA hash.
 4. Authenticate to K3s agent endpoints using HTTP Basic auth as user `node`.
-5. Generate or reuse the persisted per-node password and client key material.
-6. Request K3s client-kubelet and `system:k3s-controller` certificates and
+5. Retrieve `/v1-k3s/config` and decode the cluster Pod/Service CIDRs and
+   preferred `ClusterDNSs`/`ClusterDNS` values; persist them for restarts.
+6. Generate or reuse the persisted per-node password and client key material.
+7. Request K3s client-kubelet and `system:k3s-controller` certificates and
    persist the resulting state.
-7. Create or reconcile the Darwin/arm64 Node and retain its assigned PodCIDR.
-8. Recover matching orphaned darwin-vxlan processes and stale bridge/Pod-IP
+8. Create or reconcile the Darwin/arm64 Node and retain its assigned PodCIDR.
+9. Recover matching orphaned darwin-vxlan processes and stale bridge/Pod-IP
    aliases from an earlier unclean exit, then start the VXLAN transport, install
    Darwin routes/ARP state, and publish Flannel annotations.
-9. Discover the `kube-dns` Service with the node client and install the macOS
-   resolver file when resolver integration is enabled.
-10. Start the kubelet HTTPS endpoint and one remotedialer tunnel per discovered
+10. Discover the `kube-dns` Service with the node client, falling back to the
+    configured ClusterDNS values when necessary, and install the macOS resolver
+    file when resolver integration is enabled.
+11. Start the kubelet HTTPS endpoint and one remotedialer tunnel per discovered
     K3s API server.
-11. Begin the ten-second Node/Lease/Pod/network reconciliation loop.
+12. Begin the ten-second Node/Lease/Pod/network reconciliation loop.
 
 A subsequent join must reuse the original state directory. K3s stores only a
 hash of the node password, so deleting local state without deleting the
@@ -196,7 +199,9 @@ mappings to darwin-vxlan. Multi-peer routing is destination-specific; it is not
 blind frame replication.
 
 The Service CIDR route allows native workloads and the Mac itself to reach
-ClusterIP Services, including CoreDNS. Traffic still traverses the Linux
+ClusterIP Services, including CoreDNS. It is obtained from K3s agent
+configuration by default, with the explicit `--service-cidr` override retained.
+Traffic still traverses the Linux
 Flannel/kube-proxy path according to the selected fallback peer.
 
 ## DNS model

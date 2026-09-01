@@ -491,9 +491,10 @@ made from the allocated PodCIDR (for example `10.42.4.1/24`). maclet then:
   static single-peer fallback;
 - installs one synthetic gateway and ARP entry per discovered peer, reserves
   those addresses from workload allocation, and adds a route for each remote
-  PodCIDR; the selected `--vxlan-remote` gateway handles the configured
-  `--cluster-cidr` (`10.42.0.0/16`) and `--service-cidr` (`10.43.0.0/16`) on
-  macOS.
+  PodCIDR; the selected `--vxlan-remote` gateway handles the Pod and Service
+  CIDRs returned by K3s configuration (the defaults are `10.42.0.0/16` and
+  `10.43.0.0/16`), unless `--cluster-cidr` or `--service-cidr` explicitly
+  overrides them on macOS.
 
 The Kubernetes Node's `ExternalIP` is informational; Flannel uses its own
 `public-ip` annotation. Peer discovery uses the K3s-issued controller client
@@ -513,10 +514,12 @@ equivalent macOS networking entitlements.
 ## Cluster DNS on macOS
 
 When VXLAN is enabled, maclet discovers the `kube-dns` Service through the
-read-only peer Kubernetes client and configures the native macOS resolver at
-`/etc/resolver/cluster.local`. The resolver file points at the Service's
-ClusterIP, so macOS applications can use the real CoreDNS implementation rather
-than a flattened copy of its records:
+K3s-issued node client and configures the native macOS resolver at
+`/etc/resolver/cluster.local`. The authenticated K3s agent configuration also
+provides `ClusterDNSs` (falling back to `ClusterDNS`) if Service lookup is
+unavailable. The resolver file points at the Service's ClusterIP, so macOS
+applications can use the real CoreDNS implementation rather than a flattened
+copy of its records:
 
 ```text
 # Managed by maclet; do not edit.
@@ -532,8 +535,8 @@ resolver is reconciled during startup and on each heartbeat in case the
 `kube-dns` ClusterIP changes.
 
 The resolver integration is enabled by default for long-running VXLAN joins
-when a peer API client is available. If peer discovery credentials are missing,
-maclet logs a warning and continues without changing host DNS. Use
+when the node client is available; it can fall back to the configured
+`ClusterDNSs`/`ClusterDNS` values if the Service lookup is unavailable. Use
 `--dns-resolver=false` to leave the host resolver untouched. maclet removes its
 managed resolver file during a clean shutdown and refuses to overwrite an
 existing `/etc/resolver/cluster.local` file that was not created by maclet.

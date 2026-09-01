@@ -80,6 +80,14 @@ func runJoinCommand(args []string) error {
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
+	flags.Visit(func(flag *flag.Flag) {
+		switch flag.Name {
+		case "cluster-cidr":
+			cfg.clusterCIDRSet = true
+		case "service-cidr":
+			cfg.serviceCIDRSet = true
+		}
+	})
 	if flags.NArg() != 0 {
 		return fmt.Errorf("unexpected arguments: %s", strings.Join(flags.Args(), " "))
 	}

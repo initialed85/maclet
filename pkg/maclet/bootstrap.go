@@ -6,11 +6,66 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 )
+
+type k3sConfigResponse struct {
+	ClusterIPRanges []*net.IPNet `json:"ClusterIPRanges"`
+	ClusterIPRange  *net.IPNet   `json:"ClusterIPRange"`
+	ServiceIPRanges []*net.IPNet `json:"ServiceIPRanges"`
+	ServiceIPRange  *net.IPNet   `json:"ServiceIPRange"`
+	ClusterDNSs     []net.IP     `json:"ClusterDNSs"`
+	ClusterDNS      net.IP       `json:"ClusterDNS"`
+}
+
+func firstIPv4CIDR(primary *net.IPNet, ranges []*net.IPNet) string {
+	candidates := make([]*net.IPNet, 0, len(ranges)+1)
+	if primary != nil {
+		candidates = append(candidates, primary)
+	}
+	candidates = append(candidates, ranges...)
+	for _, candidate := range candidates {
+		if candidate == nil || candidate.IP.To4() == nil {
+			continue
+		}
+		ones, bits := candidate.Mask.Size()
+		if bits != 32 || ones < 0 {
+			continue
+		}
+		return (&net.IPNet{IP: candidate.IP.To4(), Mask: net.CIDRMask(ones, 32)}).String()
+	}
+	return ""
+}
+
+func decodeK3sAgentConfig(body []byte) (clusterCIDR, serviceCIDR string, clusterDNS []string, err error) {
+	var response k3sConfigResponse
+	if err := json.Unmarshal(body, &response); err != nil {
+		return "", "", nil, fmt.Errorf("decode k3s agent configuration: %w", err)
+	}
+	clusterCIDR = firstIPv4CIDR(response.ClusterIPRange, response.ClusterIPRanges)
+	serviceCIDR = firstIPv4CIDR(response.ServiceIPRange, response.ServiceIPRanges)
+	ips := response.ClusterDNSs
+	if len(ips) == 0 && response.ClusterDNS != nil {
+		ips = []net.IP{response.ClusterDNS}
+	}
+	seen := make(map[string]bool, len(ips))
+	for _, ip := range ips {
+		if ip == nil {
+			continue
+		}
+		value := ip.String()
+		if net.ParseIP(value) == nil || seen[value] {
+			continue
+		}
+		seen[value] = true
+		clusterDNS = append(clusterDNS, value)
+	}
+	return clusterCIDR, serviceCIDR, clusterDNS, nil
+}
 
 func bootstrap(ctx context.Context, cfg JoinConfig) (*LocalState, *APIClient, error) {
 	if err := os.MkdirAll(cfg.StateDir, 0700); err != nil {
@@ -89,8 +144,13 @@ func bootstrap(ctx context.Context, cfg JoinConfig) (*LocalState, *APIClient, er
 	if _, err := bootstrapClient.Get(ctx, "/v1-k3s/readyz"); err != nil {
 		return nil, nil, fmt.Errorf("authenticate with k3s agent token: %w", err)
 	}
-	if _, err := bootstrapClient.Get(ctx, "/v1-k3s/config"); err != nil {
+	configBody, err := bootstrapClient.Get(ctx, "/v1-k3s/config")
+	if err != nil {
 		return nil, nil, fmt.Errorf("retrieve k3s agent configuration: %w", err)
+	}
+	clusterCIDR, serviceCIDR, clusterDNS, err := decodeK3sAgentConfig(configBody)
+	if err != nil {
+		return nil, nil, err
 	}
 
 	if cfg.NodeIP == "" {
@@ -149,6 +209,7 @@ func bootstrap(ctx context.Context, cfg JoinConfig) (*LocalState, *APIClient, er
 	peerKubeconfig := expandPath(cfg.PeerKubeconfig)
 	state := &LocalState{
 		Version: 1, Server: cfg.Server, NodeName: cfg.NodeName, NodeIP: cfg.NodeIP, ExternalIP: cfg.ExternalIP,
+		ClusterCIDR: clusterCIDR, ServiceCIDR: serviceCIDR, ClusterDNS: clusterDNS,
 		PeerKubeconfig: peerKubeconfig, PeerContext: cfg.PeerContext,
 		CAFile: caFile, ClientCert: certFile, ClientKey: keyFile, PasswordFile: passwordFile,
 		ClientCA:       filepath.Join(cfg.StateDir, "client-ca.crt"),
