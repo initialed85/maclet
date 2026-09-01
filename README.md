@@ -48,9 +48,10 @@ wrapper around the implementation in `pkg/maclet`; `pkg/kube` owns the narrow
 HTTPS transport and aliases the upstream Kubernetes API objects (`core/v1`,
 `coordination/v1`, and
 `metav1`). maclet still uses a deliberately small HTTP surface rather than
-client-go. When automatic VXLAN peer discovery is enabled, it invokes the
-locally installed `kubectl` only to load the selected kubeconfig as JSON; a
-static `--vxlan-gateway-mac` override avoids that helper dependency.
+client-go. When automatic VXLAN peer discovery is enabled, it parses the
+selected kubeconfig directly and does not require a locally installed
+`kubectl`. A static `--vxlan-gateway-mac` override remains available when a
+separate peer credential is not wanted.
 
 ## CI and releases
 
@@ -138,13 +139,12 @@ On first join maclet:
 The client key, certificate, CA, node password, and state metadata are stored
 under the state directory with restrictive permissions. The join token is not
 stored after bootstrap. The peer kubeconfig is not copied into state; only its
-path and optional context are persisted. When VXLAN is enabled, maclet uses
-`kubectl config view`
-with `$KUBECONFIG` or `~/.kube/config` by default to list peer Nodes and read
-their Flannel annotations. Prefer a dedicated least-privilege kubeconfig
-rather than an administrator kubeconfig for production use. `kubectl` must be
-available on `PATH` for automatic peer discovery. Reuse that same state
-directory for subsequent starts:
+path and optional context are persisted. When VXLAN is enabled, maclet parses
+`$KUBECONFIG` or `~/.kube/config` directly to list peer Nodes and read their
+Flannel annotations. Prefer a dedicated least-privilege kubeconfig rather than
+an administrator kubeconfig for production use. `kubectl` is not required for
+maclet bootstrap or automatic peer discovery. Reuse that same state directory
+for subsequent starts:
 K3s stores only a hash of the per-node password, so a fresh bootstrap for an
 existing node name cannot generate a replacement password. If the state is
 lost, delete the Node and its `kube-system/<node>.node-password.k3s` Secret

@@ -7,10 +7,11 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"os/exec"
 	osuser "os/user"
 	"path/filepath"
 	"strings"
+
+	"sigs.k8s.io/yaml"
 )
 
 type kubeconfigJSON struct {
@@ -141,16 +142,13 @@ func loadPeerAPIClient(server, kubeconfigPath, contextName string, insecure bool
 		}
 		return nil, false, fmt.Errorf("stat peer kubeconfig: %w", err)
 	}
-	command := exec.Command("kubectl", "config", "view", "--raw", "--output=json", "--kubeconfig", kubeconfigPath)
-	if contextName != "" {
-		command.Args = append(command.Args, "--context", contextName)
-	}
-	body, err := command.Output()
+	yamlBody, err := os.ReadFile(kubeconfigPath)
 	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			return nil, false, fmt.Errorf("read peer kubeconfig with kubectl: %s", strings.TrimSpace(string(exitErr.Stderr)))
-		}
-		return nil, false, fmt.Errorf("read peer kubeconfig with kubectl: %w", err)
+		return nil, false, fmt.Errorf("read peer kubeconfig: %w", err)
+	}
+	body, err := yaml.YAMLToJSON(yamlBody)
+	if err != nil {
+		return nil, false, fmt.Errorf("decode peer kubeconfig YAML: %w", err)
 	}
 	var config kubeconfigJSON
 	if err := json.Unmarshal(body, &config); err != nil {
