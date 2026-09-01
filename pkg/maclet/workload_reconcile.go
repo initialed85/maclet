@@ -287,7 +287,7 @@ func (m *workloadManager) reconcile(ctx context.Context, client *APIClient, pods
 		if m.debug {
 			log.Printf("debug: Macker invocation for %s/%s: %s", pod.ObjectMeta.Namespace, pod.ObjectMeta.Name, formatCommandArgs(args))
 		}
-		if _, err := m.mackerOutput(args...); err != nil {
+		if err := m.startMackerWorkload(args, pod.Spec.Containers[0].Image); err != nil {
 			reconcileErrors = append(reconcileErrors, fmt.Errorf("start Macker workload %s/%s: %w", pod.ObjectMeta.Namespace, pod.ObjectMeta.Name, err))
 			managed.RetryAfter = time.Now().Add(workloadRetryDelay)
 			_ = m.updateStatus(ctx, client, pod, "Pending", ip, "MacletMackerLaunchFailed", err.Error(), false, managed.RestartCount)

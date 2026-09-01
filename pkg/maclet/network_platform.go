@@ -6,20 +6,46 @@ import (
 	"fmt"
 	"net"
 	"os/exec"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
 )
 
 func signalProcessTree(pid int, useSudo bool, signal syscall.Signal) {
-	if useSudo {
-		if output, err := exec.Command("pgrep", "-P", fmt.Sprint(pid)).Output(); err == nil {
-			for _, child := range strings.Fields(string(output)) {
-				_ = privilegedCommand(true, "kill", fmt.Sprintf("-%d", signal), child).Run()
-			}
+	children := processDescendants(pid)
+	for index := len(children) - 1; index >= 0; index-- {
+		child := children[index]
+		if useSudo {
+			_ = privilegedCommand(true, "kill", fmt.Sprintf("-%d", signal), fmt.Sprint(child)).Run()
+		} else {
+			_ = syscall.Kill(child, signal)
 		}
 	}
-	_ = syscall.Kill(pid, signal)
+	if useSudo {
+		// The root is usually the user-owned sudo wrapper, but using sudo here
+		// also handles callers that pass the root-owned darwin-vxlan child.
+		_ = privilegedCommand(true, "kill", fmt.Sprintf("-%d", signal), fmt.Sprint(pid)).Run()
+	} else {
+		_ = syscall.Kill(pid, signal)
+	}
+}
+
+func processDescendants(pid int) []int {
+	output, err := exec.Command("pgrep", "-P", fmt.Sprint(pid)).Output()
+	if err != nil {
+		return nil
+	}
+	children := make([]int, 0)
+	for _, field := range strings.Fields(string(output)) {
+		child, parseErr := strconv.Atoi(field)
+		if parseErr != nil || child <= 0 {
+			continue
+		}
+		children = append(children, processDescendants(child)...)
+		children = append(children, child)
+	}
+	return children
 }
 
 func interfaceForAddress(addressCIDR string) (string, error) {

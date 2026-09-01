@@ -265,8 +265,26 @@ func (h *DarwinNetworkHandle) addWorkloadIP(ip string) error {
 			return nil
 		}
 	}
+	// A previous maclet process may have died after adding the alias but
+	// before recording it in the in-memory handle. Adopt an address already
+	// owned by this bridge instead of treating the operation as a conflict.
+	if existingInterface, inspectErr := interfaceForAddress(canonicalIP + "/32"); inspectErr != nil {
+		return fmt.Errorf("inspect existing workload address %s: %w", canonicalIP, inspectErr)
+	} else if existingInterface != "" {
+		if existingInterface != h.Interface {
+			return fmt.Errorf("workload address %s is already present on %s, not %s", canonicalIP, existingInterface, h.Interface)
+		}
+		h.Aliases = append(h.Aliases, canonicalIP)
+		return nil
+	}
 	command := privilegedCommand(h.useSudo, "ifconfig", h.Interface, "inet", canonicalIP, "netmask", "255.255.255.255", "alias")
 	if output, err := command.CombinedOutput(); err != nil {
+		// Resolve a race with another reconciler or an interrupted previous
+		// invocation by checking whether the alias appeared on our bridge.
+		if existingInterface, inspectErr := interfaceForAddress(canonicalIP + "/32"); inspectErr == nil && existingInterface == h.Interface {
+			h.Aliases = append(h.Aliases, canonicalIP)
+			return nil
+		}
 		return fmt.Errorf("add workload address %s to %s: %w (%s)", canonicalIP, h.Interface, err, strings.TrimSpace(string(output)))
 	}
 	h.Aliases = append(h.Aliases, canonicalIP)

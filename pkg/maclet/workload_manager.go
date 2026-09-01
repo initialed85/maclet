@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -190,6 +191,41 @@ func (m *workloadManager) mackerOutput(args ...string) ([]byte, error) {
 		return nil, fmt.Errorf("macker %s: %w (%s)", strings.Join(args, " "), err, message)
 	}
 	return output, nil
+}
+
+func mackerImageMissing(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := err.Error()
+	return strings.Contains(message, "image is not present in local storage") ||
+		strings.Contains(message, "pull or build it first")
+}
+
+// startMackerWorkload starts a native workload and lazily pulls its Darwin
+// image when the local Macker store does not contain it. Macker deliberately
+// keeps pulling out of its run command, so a fresh maclet node needs this
+// small orchestration layer to make an assigned Pod self-sufficient.
+func (m *workloadManager) startMackerWorkload(args []string, image string) error {
+	if _, err := m.mackerOutput(args...); err == nil {
+		return nil
+	} else if !mackerImageMissing(err) {
+		return err
+	} else {
+		if image == "" {
+			return fmt.Errorf("Macker reported a missing image but the Pod image is empty: %w", err)
+		}
+		if m.debug {
+			log.Printf("debug: Macker image %s is not local; pulling it before retrying workload", image)
+		}
+		if _, pullErr := m.mackerOutput("pull", image); pullErr != nil {
+			return fmt.Errorf("pull Macker image %s: %w (initial run: %v)", image, pullErr, err)
+		}
+		if _, retryErr := m.mackerOutput(args...); retryErr != nil {
+			return fmt.Errorf("retry Macker workload after pulling image %s: %w", image, retryErr)
+		}
+		return nil
+	}
 }
 
 func mackerContainerStatus(output, name string) (status string, found bool) {

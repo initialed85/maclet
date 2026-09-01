@@ -3,6 +3,7 @@ package maclet
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -47,6 +48,43 @@ func TestWorkloadJournalRoundTrip(t *testing.T) {
 	}
 	if journal.Version != 1 || len(journal.Workloads) != 1 {
 		t.Fatalf("journal = %#v", journal)
+	}
+}
+
+func TestMackerImageMissing(t *testing.T) {
+	if !mackerImageMissing(errors.New("run image: image is not present in local storage; pull or build it first")) {
+		t.Fatal("mackerImageMissing() did not recognize the current Macker error")
+	}
+	if mackerImageMissing(errors.New("run image: permission denied")) {
+		t.Fatal("mackerImageMissing() recognized an unrelated error")
+	}
+}
+
+func TestStartMackerWorkloadPullsMissingImageAndRetries(t *testing.T) {
+	root := t.TempDir()
+	logPath := filepath.Join(root, "calls")
+	markerPath := filepath.Join(root, "pulled")
+	scriptPath := filepath.Join(root, "macker")
+	script := "#!/bin/sh\n" +
+		"echo \"$@\" >> \"" + logPath + "\"\n" +
+		"if [ \"$1\" = run ] && [ ! -f \"" + markerPath + "\" ]; then\n" +
+		"  echo 'image is not present in local storage; pull or build it first' >&2\n" +
+		"  exit 1\n" +
+		"fi\n" +
+		"if [ \"$1\" = pull ]; then touch \"" + markerPath + "\"; fi\n"
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	manager := newWorkloadManager(nil, scriptPath, "")
+	if err := manager.startMackerWorkload([]string{"run", "--detach", "example/image:latest"}, "example/image:latest"); err != nil {
+		t.Fatal(err)
+	}
+	calls, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := strings.TrimSpace(string(calls)), "run --detach example/image:latest\npull example/image:latest\nrun --detach example/image:latest"; got != want {
+		t.Fatalf("Macker calls = %q, want %q", got, want)
 	}
 }
 

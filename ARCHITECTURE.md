@@ -124,7 +124,9 @@ external network configuration:
 - image environment and Kubernetes container configuration;
 - optional hostPath-backed mounts; and
 - published ports, which use per-workload Macker node ports and PF redirects
-  by default.
+  by default; and
+- lazy image pulls through Macker when a scheduled Darwin image is absent from
+  the local store.
 
 Macker starts ordinary macOS processes. It does not provide a Linux namespace,
 filesystem, capability, or security boundary.
@@ -153,8 +155,9 @@ Nodes or delete Pods.
 5. Generate or reuse the persisted per-node password and client key material.
 6. Request a K3s client-kubelet certificate and persist the resulting state.
 7. Create or reconcile the Darwin/arm64 Node and retain its assigned PodCIDR.
-8. Start the VXLAN transport, install Darwin routes/ARP state, and publish
-   Flannel annotations.
+8. Recover matching orphaned darwin-vxlan processes and stale bridge/Pod-IP
+   aliases from an earlier unclean exit, then start the VXLAN transport, install
+   Darwin routes/ARP state, and publish Flannel annotations.
 9. Discover the `kube-dns` Service and install the macOS resolver file when
    resolver integration is enabled.
 10. Start the kubelet HTTPS endpoint and one remotedialer tunnel per discovered
@@ -294,7 +297,6 @@ maclet currently does not provide:
 - a native Darwin CNI implementation;
 - sidecars or multi-container Pods;
 - projected/configMap/Secret volume projection;
-- image pulling during Pod reconciliation;
 - general Kubernetes Service proxying or network policy; or
 - the complete kubelet/CRI API surface.
 

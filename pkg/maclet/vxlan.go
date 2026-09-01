@@ -56,21 +56,36 @@ func startVXLAN(ctx context.Context, cfg JoinConfig, node *Node, peers []Flannel
 	// ClusterIP traffic must use the selected Linux node as its service
 	// gateway; kube-proxy on that node can then select the actual backend.
 	arguments = append(arguments, "--peer", cfg.ServiceCIDR+"="+cfg.VXLANRemote)
-	if existingBridge, err := interfaceForAddress(bridgeCIDR); err != nil {
-		return nil, fmt.Errorf("inspect existing VXLAN bridge address: %w", err)
-	} else if existingBridge != "" {
-		return nil, fmt.Errorf("VXLAN bridge address %s is already present on %s; clean up the existing tunnel before starting another", bridgeCIDR, existingBridge)
+	if recovered, err := recoverStaleVXLAN(cfg, bridgeCIDR, local); err != nil {
+		return nil, fmt.Errorf("recover stale VXLAN state: %w", err)
+	} else if recovered {
+		log.Printf("recovered stale VXLAN state for bridge address %s", bridgeCIDR)
 	}
 	var command *exec.Cmd
-	if cfg.useSudo {
-		command = exec.Command("sudo", append([]string{"-n", cfg.VXLANBinary}, arguments...)...)
-	} else {
-		command = exec.Command(cfg.VXLANBinary, arguments...)
-	}
-	command.Stdout = os.Stdout
-	command.Stderr = os.Stderr
-	if err := command.Start(); err != nil {
-		return nil, fmt.Errorf("start darwin-vxlan: %w", err)
+	for attempt := 0; ; attempt++ {
+		if cfg.useSudo {
+			command = exec.Command("sudo", append([]string{"-n", cfg.VXLANBinary}, arguments...)...)
+		} else {
+			command = exec.Command(cfg.VXLANBinary, arguments...)
+		}
+		command.Stdout = os.Stdout
+		command.Stderr = os.Stderr
+		if err := command.Start(); err == nil {
+			break
+		} else if attempt == 0 {
+			// A process can appear between stale-state inspection and
+			// command.Start. Retry once after applying the same narrow
+			// ownership check rather than killing arbitrary VXLAN users.
+			if recovered, recoveryErr := recoverStaleVXLAN(cfg, bridgeCIDR, local); recoveryErr != nil {
+				return nil, fmt.Errorf("start darwin-vxlan: %w (stale-state recovery: %v)", err, recoveryErr)
+			} else if recovered {
+				log.Printf("recovered stale VXLAN state after startup failure")
+				continue
+			}
+			return nil, fmt.Errorf("start darwin-vxlan: %w", err)
+		} else {
+			return nil, fmt.Errorf("start darwin-vxlan after stale-state recovery: %w", err)
+		}
 	}
 	log.Printf("started VXLAN child pid=%d podCIDR=%s bridgeCIDR=%s", command.Process.Pid, cidr, bridgeCIDR)
 	wait := make(chan error, 1)

@@ -285,9 +285,10 @@ spec:
       secretName: nginx-dev-initialed85-cc
 ```
 
-Start maclet with VXLAN and Macker, make sure the Darwin image is already in
-Macker's local image store (Macker does not pull images during reconciliation),
-and then apply the manifest:
+Start maclet with VXLAN and Macker, then apply the manifest. If a Darwin
+image is not already in Macker's local image store, maclet asks Macker to pull
+it from the registry and retries the workload launch. To prefetch the image
+and fail early if registry access is unavailable, run:
 
 ```sh
 macker pull docker.io/initialed85/nginx:latest
@@ -361,8 +362,9 @@ environment entries, custom working directories, and `hostPort` mappings are
 also rejected. With a recent Macker, maclet records the actual exit code and
 termination timestamps in the Kubernetes container status; older Macker
 binaries retain the previous status-only fallback. Supply `--macker-binary` to
-`join` when Macker is not on `PATH`; image layouts must already be available in
-Macker's image store. Add `--debug` to log each quoted Macker invocation and,
+`join` when Macker is not on `PATH`; missing Darwin images are pulled lazily
+through Macker's normal registry credential handling. Add `--debug` to log each
+quoted Macker invocation and,
 when a native process exits during startup, its captured Macker logs. Debug
 output can include Pod environment values, so use it only in a suitable log.
 
@@ -494,10 +496,11 @@ read-only credential. `--vxlan-remote` should point at a healthy Linux Flannel
 node because it remains the ServiceCIDR and unmapped fallback peer. Clean
 shutdown removes the annotations, per-peer routes, ARP entries, and aliases
 before stopping the child. An unclean kill can leave temporary host routes or
-stale remote FDB state behind.
-
-Do not start another process that owns the same local UDP endpoint. VXLAN and
-route setup require root or equivalent macOS networking entitlements.
+stale remote FDB state behind; the next join automatically recovers matching
+orphaned darwin-vxlan processes and stale bridge/Pod-IP aliases for this node.
+Unrelated tunnels that own the same local UDP endpoint or conflicting network
+state still require manual cleanup. VXLAN and route setup require root or
+equivalent macOS networking entitlements.
 
 ## Cluster DNS on macOS
 
@@ -542,11 +545,13 @@ workloads; macOS does not receive each Kubernetes Pod's namespace-specific
 
 Not implemented yet:
 
-- complete automatic cleanup after an unclean process kill (network routes,
-  ARP state, or the VXLAN child may still require manual cleanup);
+- complete automatic cleanup after an unclean process kill (network routes or
+  ARP state may still require manual cleanup, although matching orphaned
+  darwin-vxlan children and stale bridge/Pod-IP aliases are recovered on the
+  next join);
 - a native Darwin CNI implementation;
 - full kubelet/CRI Pod lifecycle semantics, including sidecars, projected
-  volumes, image pulling, and CNI integration;
+  volumes, and CNI integration;
 - an `/etc/hosts` fallback for runtimes that ignore macOS's `/etc/resolver`
   mechanism;
 - service proxying, Pod host-port mapping, or network policy;
