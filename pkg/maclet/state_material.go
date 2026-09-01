@@ -36,6 +36,27 @@ func validPEMCertificate(body []byte) bool {
 	return err == nil
 }
 
+// splitCertificateAndKeyPEM separates the certificate chain from an optional
+// private key in a K3s certificate response. Current servers sign the CSR and
+// return only certificates; older servers may return a certificate and the
+// server-generated private key together.
+func splitCertificateAndKeyPEM(body []byte) (certPEM, keyPEM []byte) {
+	for {
+		block, rest := pem.Decode(body)
+		if block == nil {
+			break
+		}
+		body = rest
+		encoded := pem.EncodeToMemory(block)
+		if strings.Contains(block.Type, "PRIVATE KEY") {
+			keyPEM = append(keyPEM, encoded...)
+		} else {
+			certPEM = append(certPEM, encoded...)
+		}
+	}
+	return certPEM, keyPEM
+}
+
 func writeLocalState(path string, state *LocalState) error {
 	body, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
@@ -61,12 +82,16 @@ func ensureControllerClientMaterial(ctx context.Context, client *APIClient, stat
 	if err != nil {
 		return fmt.Errorf("generate k3s controller certificate key: %w", err)
 	}
-	certPEM, err := client.Do(ctx, http.MethodPost, "/v1-k3s/client-k3s-controller.crt", csrDER, "application/pkcs10", nil)
+	responsePEM, err := client.Do(ctx, http.MethodPost, "/v1-k3s/client-k3s-controller.crt", csrDER, "application/pkcs10", nil)
 	if err != nil {
 		return fmt.Errorf("request k3s controller certificate: %w", err)
 	}
+	certPEM, returnedKeyPEM := splitCertificateAndKeyPEM(responsePEM)
 	if !validPEMCertificate(certPEM) {
 		return errors.New("k3s returned an invalid controller client certificate")
+	}
+	if len(returnedKeyPEM) > 0 {
+		keyPEM = returnedKeyPEM
 	}
 	if err := writePrivateFile(state.ControllerKey, keyPEM, 0600); err != nil {
 		return err
