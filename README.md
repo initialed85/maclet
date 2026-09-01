@@ -556,19 +556,26 @@ isolated Linux Pods.
 
 ## Removing the experiment node
 
-There is not yet a built-in `maclet leave` command. To fully unregister the
-experimental node, stop maclet first (normally with `Ctrl-C`) so its VXLAN
-child, routes, ARP entries, resolver configuration, and Flannel annotations are
-cleaned up, then run:
+Stop the long-running maclet process first (normally with `Ctrl-C`) so its
+native workloads, VXLAN child, routes, ARP entries, resolver configuration, and
+Flannel annotations are cleaned up. Then the `leave` command removes the
+cluster-side Node, Lease, and K3s node-password Secret and deletes maclet's
+persisted credentials and state files:
 
 ```sh
-kubectl --context home-dev delete node maclet --ignore-not-found
-kubectl --context home-dev -n kube-node-lease delete lease maclet --ignore-not-found
-kubectl --context home-dev -n kube-system delete secret maclet.node-password.k3s --ignore-not-found
-rm -rf ~/.maclet
+./maclet leave --context home-dev
 ```
 
+`leave` reads the server, Node name, and peer kubeconfig from the persisted
+state. Use `--kubeconfig` to select a different kubeconfig, or
+`--state-dir` to select a different state directory. The kubeconfig identity
+must be allowed to patch/delete the Node and delete the Lease and Secret;
+maclet's restricted `system:node` certificate is intentionally insufficient.
+The operation is idempotent for resources that are already absent. It does not
+delete Kubernetes Pods; let the daemon drain them before leaving, and use the
+separate cleanup controller for stale terminating native Pods.
+
 Deleting the node-password Secret is necessary if the name will be reused.
-K3s stores only a hash of the per-node password, so deleting `~/.maclet`
+K3s stores only a hash of the per-node password, so deleting local state
 without deleting that Secret will make the next join fail with a password-hash
-mismatch. Do not remove the Secret while maclet is still running.
+mismatch.

@@ -267,6 +267,14 @@ transient host state behind, so the next startup reconciles the workload
 journal and resolver file, while the network state may require the existing
 Darwin networking cleanup path.
 
+After the daemon has stopped, `maclet leave` uses the persisted state and a
+separately authorized peer kubeconfig to clear Flannel annotations and remove
+the Node, `kube-node-lease` Lease, and K3s node-password Secret. It then removes
+maclet's generated local credential and journal files. The command is
+idempotent for already-absent API objects but intentionally does not delete
+Kubernetes Pods; stale Pod objects remain the responsibility of the scoped
+cleanup controller.
+
 ## Deliberate boundaries
 
 maclet currently does not provide:

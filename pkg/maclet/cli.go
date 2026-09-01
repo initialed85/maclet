@@ -41,11 +41,12 @@ func usage() {
 
 Usage:
   maclet join [options]                 register/heartbeat a Darwin node
+  maclet leave [options]                unregister the node and remove local state
   maclet workloads [options]            print pods scheduled to this node as JSON
   maclet cleanup-controller [options]   remove stale native Pods with explicit cleanup RBAC
   maclet version
 
-Run "maclet join --help" or "maclet workloads --help" for command options.
+Run "maclet join --help", "maclet leave --help", or "maclet workloads --help" for command options.
 `, version)
 }
 
@@ -109,6 +110,8 @@ func Main(args []string) int {
 	switch args[0] {
 	case "join":
 		err = runJoinCommand(args[1:])
+	case "leave":
+		err = leaveCommand(args[1:])
 	case "workloads":
 		err = runWorkloadsCommand(args[1:])
 	case "cleanup-controller":
