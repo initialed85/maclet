@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"log"
 	"net"
 	"os"
 	"path/filepath"
@@ -28,6 +29,7 @@ type clusterDNSResolver struct {
 	useSudo             bool
 	nameservers         []string
 	fallbackNameservers []string
+	fallbackActive      bool
 	owned               bool
 }
 
@@ -47,6 +49,12 @@ func (r *clusterDNSResolver) reconcile(ctx context.Context, client *APIClient) e
 		if len(nameservers) == 0 {
 			return err
 		}
+		if !r.fallbackActive {
+			log.Printf("warning: kube-dns Service lookup unavailable; using ClusterDNS values from /v1-k3s/config: %s", strings.Join(nameservers, ", "))
+			r.fallbackActive = true
+		}
+	} else {
+		r.fallbackActive = false
 	}
 	if sameStrings(r.nameservers, nameservers) && r.owned {
 		matches, matchErr := managedResolverFileMatches(r.path, r.domain, nameservers)

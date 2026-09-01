@@ -42,6 +42,21 @@ func runJoin(cfg JoinConfig) error {
 	if !cfg.serviceCIDRSet && (cfg.ServiceCIDR == "" || cfg.ServiceCIDR == defaultServiceCIDR) && state.ServiceCIDR != "" {
 		cfg.ServiceCIDR = state.ServiceCIDR
 	}
+	clusterCIDRSource := "default"
+	if state.ClusterCIDR != "" {
+		clusterCIDRSource = "/v1-k3s/config"
+	}
+	if cfg.clusterCIDRSet {
+		clusterCIDRSource = "--cluster-cidr"
+	}
+	serviceCIDRSource := "default"
+	if state.ServiceCIDR != "" {
+		serviceCIDRSource = "/v1-k3s/config"
+	}
+	if cfg.serviceCIDRSet {
+		serviceCIDRSource = "--service-cidr"
+	}
+	log.Printf("network configuration: cluster-cidr=%s (%s), service-cidr=%s (%s)", cfg.ClusterCIDR, clusterCIDRSource, cfg.ServiceCIDR, serviceCIDRSource)
 	if cfg.DrainTimeout <= 0 {
 		cfg.DrainTimeout = defaultDrainTimeout
 	}

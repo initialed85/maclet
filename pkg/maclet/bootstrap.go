@@ -22,12 +22,17 @@ type k3sConfigResponse struct {
 	ClusterDNS      net.IP       `json:"ClusterDNS"`
 }
 
-func firstIPv4CIDR(primary *net.IPNet, ranges []*net.IPNet) string {
-	candidates := make([]*net.IPNet, 0, len(ranges)+1)
-	if primary != nil {
-		candidates = append(candidates, primary)
+func firstIPv4CIDR(name string, primary *net.IPNet, ranges []*net.IPNet) (string, error) {
+	// K3s prefers the plural fields when they contain entries. This matters for
+	// dual-stack clusters, where the singular field may not represent the full
+	// configured set.
+	candidates := ranges
+	if len(candidates) == 0 && primary != nil {
+		candidates = []*net.IPNet{primary}
 	}
-	candidates = append(candidates, ranges...)
+	if len(candidates) == 0 {
+		return "", nil
+	}
 	for _, candidate := range candidates {
 		if candidate == nil || candidate.IP.To4() == nil {
 			continue
@@ -36,9 +41,9 @@ func firstIPv4CIDR(primary *net.IPNet, ranges []*net.IPNet) string {
 		if bits != 32 || ones < 0 {
 			continue
 		}
-		return (&net.IPNet{IP: candidate.IP.To4(), Mask: net.CIDRMask(ones, 32)}).String()
+		return (&net.IPNet{IP: candidate.IP.To4(), Mask: net.CIDRMask(ones, 32)}).String(), nil
 	}
-	return ""
+	return "", fmt.Errorf("K3s %s configuration contains no IPv4 CIDR", name)
 }
 
 func decodeK3sAgentConfig(body []byte) (clusterCIDR, serviceCIDR string, clusterDNS []string, err error) {
@@ -46,8 +51,14 @@ func decodeK3sAgentConfig(body []byte) (clusterCIDR, serviceCIDR string, cluster
 	if err := json.Unmarshal(body, &response); err != nil {
 		return "", "", nil, fmt.Errorf("decode k3s agent configuration: %w", err)
 	}
-	clusterCIDR = firstIPv4CIDR(response.ClusterIPRange, response.ClusterIPRanges)
-	serviceCIDR = firstIPv4CIDR(response.ServiceIPRange, response.ServiceIPRanges)
+	clusterCIDR, err = firstIPv4CIDR("cluster", response.ClusterIPRange, response.ClusterIPRanges)
+	if err != nil {
+		return "", "", nil, err
+	}
+	serviceCIDR, err = firstIPv4CIDR("service", response.ServiceIPRange, response.ServiceIPRanges)
+	if err != nil {
+		return "", "", nil, err
+	}
 	ips := response.ClusterDNSs
 	if len(ips) == 0 && response.ClusterDNS != nil {
 		ips = []net.IP{response.ClusterDNS}
@@ -63,6 +74,9 @@ func decodeK3sAgentConfig(body []byte) (clusterCIDR, serviceCIDR string, cluster
 		}
 		seen[value] = true
 		clusterDNS = append(clusterDNS, value)
+	}
+	if (len(response.ClusterDNSs) > 0 || response.ClusterDNS != nil) && len(clusterDNS) == 0 {
+		return "", "", nil, errors.New("K3s cluster DNS configuration contains no usable IP address")
 	}
 	return clusterCIDR, serviceCIDR, clusterDNS, nil
 }
