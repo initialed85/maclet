@@ -44,6 +44,44 @@ func writeLocalState(path string, state *LocalState) error {
 	return writePrivateFile(path, append(body, '\n'), 0600)
 }
 
+func ensureControllerClientMaterial(ctx context.Context, client *APIClient, state *LocalState, statePath string) error {
+	stateDir := filepath.Dir(statePath)
+	if state.ControllerCert == "" {
+		state.ControllerCert = filepath.Join(stateDir, "client-k3s-controller.crt")
+	}
+	if state.ControllerKey == "" {
+		state.ControllerKey = filepath.Join(stateDir, "client-k3s-controller.key")
+	}
+	if validPEMCertificateFile(state.ControllerCert) {
+		if _, err := os.Stat(state.ControllerKey); err == nil {
+			return writeLocalState(statePath, state)
+		}
+	}
+	csrDER, keyPEM, err := generateClientCSR("")
+	if err != nil {
+		return fmt.Errorf("generate k3s controller certificate key: %w", err)
+	}
+	certPEM, err := client.Do(ctx, http.MethodPost, "/v1-k3s/client-k3s-controller.crt", csrDER, "application/pkcs10", nil)
+	if err != nil {
+		return fmt.Errorf("request k3s controller certificate: %w", err)
+	}
+	if !validPEMCertificate(certPEM) {
+		return errors.New("k3s returned an invalid controller client certificate")
+	}
+	if err := writePrivateFile(state.ControllerKey, keyPEM, 0600); err != nil {
+		return err
+	}
+	if err := writePrivateFile(state.ControllerCert, certPEM, 0600); err != nil {
+		return err
+	}
+	return writeLocalState(statePath, state)
+}
+
+func validPEMCertificateFile(path string) bool {
+	body, err := os.ReadFile(path)
+	return err == nil && validPEMCertificate(body)
+}
+
 func ensureKubeletServerMaterial(ctx context.Context, client *APIClient, state *LocalState, statePath, nodeName, nodeIP string) error {
 	stateDir := filepath.Dir(statePath)
 	if state.ClientCA == "" {

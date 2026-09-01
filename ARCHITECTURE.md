@@ -28,7 +28,8 @@ flowchart LR
         CLI["maclet executable<br/>root main.go wrapper"]
         Agent["pkg/maclet<br/>join + reconciliation"]
         NodeAPI["Node API client<br/>K3s-issued client cert"]
-        PeerAPI["Peer API client<br/>read-only kubeconfig"]
+        ControllerAPI["Controller API client<br/>K3s-issued controller cert"]
+        PeerAPI["Optional peer API client<br/>explicit kubeconfig"]
         VXLAN["darwin-vxlan child<br/>privileged via sudo -n"]
         Bridge["isolated vmnet bridge<br/>PodCIDR address + aliases"]
         Resolver["/etc/resolver/cluster.local<br/>managed by resolver-helper"]
@@ -42,15 +43,17 @@ flowchart LR
 
     CLI --> Agent
     Agent --> NodeAPI
-    Agent --> PeerAPI
+    Agent --> ControllerAPI
+    Agent -. optional override .-> PeerAPI
     NodeAPI <--> API
+    ControllerAPI <--> API
     PeerAPI <--> API
 
     Agent --> VXLAN --> Bridge
     Bridge <--> Flannel
     Bridge <--> LinuxPods
 
-    PeerAPI -->|discover kube-dns ClusterIP| Resolver
+    NodeAPI -->|read kube-dns ClusterIP| Resolver
     Resolver -->|native macOS DNS queries| CoreDNS
 
     Agent --> Workloads --> Macker --> Native
@@ -133,17 +136,21 @@ filesystem, capability, or security boundary.
 
 ### Kubernetes API clients
 
-maclet maintains two distinct API identities:
+maclet maintains two K3s-issued API identities:
 
-1. **Node client** — the K3s-issued client-kubelet certificate for the registered
+1. **Node client** — the client-kubelet certificate for the registered
    `system:node:<name>` identity. It handles Node/Lease heartbeats, the assigned
-   Pod list, scoped Pod status updates, and kubelet bootstrap material.
-2. **Peer client** — a separately configured kubeconfig identity used for
-   read-only Flannel peer discovery and the cluster DNS Service. The same
-   identity can optionally perform narrowly scoped stale native-Pod cleanup.
+   Pod list, scoped Pod status updates, kubelet bootstrap material, and the
+   cluster DNS Service lookup.
+2. **Controller client** — the `system:k3s-controller` certificate obtained
+   from the K3s agent endpoint with the join token. Maclet uses it to list peer
+   Nodes and read their Flannel annotations, just as the normal K3s agent's
+   Flannel process does.
 
-The restricted node identity is not granted broad permission to list arbitrary
-Nodes or delete Pods.
+An explicitly configured peer kubeconfig remains an override for unusual RBAC
+layouts and is used for operations that need delete permission, such as stale
+native-Pod cleanup and `leave`. Neither K3s-issued identity is granted broad
+Pod-delete permission.
 
 ## Join and bootstrap sequence
 
@@ -153,13 +160,14 @@ Nodes or delete Pods.
 3. Fetch `/cacerts` and validate the token's CA hash.
 4. Authenticate to K3s agent endpoints using HTTP Basic auth as user `node`.
 5. Generate or reuse the persisted per-node password and client key material.
-6. Request a K3s client-kubelet certificate and persist the resulting state.
+6. Request K3s client-kubelet and `system:k3s-controller` certificates and
+   persist the resulting state.
 7. Create or reconcile the Darwin/arm64 Node and retain its assigned PodCIDR.
 8. Recover matching orphaned darwin-vxlan processes and stale bridge/Pod-IP
    aliases from an earlier unclean exit, then start the VXLAN transport, install
    Darwin routes/ARP state, and publish Flannel annotations.
-9. Discover the `kube-dns` Service and install the macOS resolver file when
-   resolver integration is enabled.
+9. Discover the `kube-dns` Service with the node client and install the macOS
+   resolver file when resolver integration is enabled.
 10. Start the kubelet HTTPS endpoint and one remotedialer tunnel per discovered
     K3s API server.
 11. Begin the ten-second Node/Lease/Pod/network reconciliation loop.

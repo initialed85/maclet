@@ -14,6 +14,8 @@ type LocalState struct {
 	ClientCert     string `json:"clientCert"`
 	ClientKey      string `json:"clientKey"`
 	ClientCA       string `json:"clientCA,omitempty"`
+	ControllerCert string `json:"controllerCert,omitempty"`
+	ControllerKey  string `json:"controllerKey,omitempty"`
 	ServingCert    string `json:"servingCert,omitempty"`
 	ServingKey     string `json:"servingKey,omitempty"`
 	PasswordFile   string `json:"passwordFile"`

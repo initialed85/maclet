@@ -38,6 +38,27 @@ func bootstrap(ctx context.Context, cfg JoinConfig) (*LocalState, *APIClient, er
 		if err := ensureKubeletServerMaterial(ctx, client, &state, statePath, state.NodeName, state.NodeIP); err != nil {
 			return nil, nil, err
 		}
+		if !validPEMCertificateFile(state.ControllerCert) && (cfg.Token != "" || cfg.TokenFile != "") {
+			token, err := readToken(cfg.Token, cfg.TokenFile)
+			if err != nil {
+				return nil, nil, err
+			}
+			password, _, err := tokenPassword(token)
+			if err != nil {
+				return nil, nil, err
+			}
+			caPEM, err := os.ReadFile(state.CAFile)
+			if err != nil {
+				return nil, nil, fmt.Errorf("read server CA for controller certificate: %w", err)
+			}
+			bootstrapClient, err := newAPIClientWithMaterial(state.Server, caPEM, nil, nil, cfg.InsecureSkipTLSVerify, "node", password, "")
+			if err != nil {
+				return nil, nil, err
+			}
+			if err := ensureControllerClientMaterial(ctx, bootstrapClient, &state, statePath); err != nil {
+				return nil, nil, err
+			}
+		}
 		return &state, client, nil
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return nil, nil, fmt.Errorf("read %s: %w", statePath, err)
@@ -126,21 +147,18 @@ func bootstrap(ctx context.Context, cfg JoinConfig) (*LocalState, *APIClient, er
 		}
 	}
 	peerKubeconfig := expandPath(cfg.PeerKubeconfig)
-	if peerKubeconfig == "" {
-		candidate := defaultPeerKubeconfig()
-		if candidate != "" {
-			if _, statErr := os.Stat(expandPath(candidate)); statErr == nil {
-				peerKubeconfig = candidate
-			}
-		}
-	}
 	state := &LocalState{
 		Version: 1, Server: cfg.Server, NodeName: cfg.NodeName, NodeIP: cfg.NodeIP, ExternalIP: cfg.ExternalIP,
 		PeerKubeconfig: peerKubeconfig, PeerContext: cfg.PeerContext,
 		CAFile: caFile, ClientCert: certFile, ClientKey: keyFile, PasswordFile: passwordFile,
-		ClientCA:    filepath.Join(cfg.StateDir, "client-ca.crt"),
-		ServingCert: filepath.Join(cfg.StateDir, "serving-kubelet.crt"),
-		ServingKey:  filepath.Join(cfg.StateDir, "serving-kubelet.key"),
+		ClientCA:       filepath.Join(cfg.StateDir, "client-ca.crt"),
+		ControllerCert: filepath.Join(cfg.StateDir, "client-k3s-controller.crt"),
+		ControllerKey:  filepath.Join(cfg.StateDir, "client-k3s-controller.key"),
+		ServingCert:    filepath.Join(cfg.StateDir, "serving-kubelet.crt"),
+		ServingKey:     filepath.Join(cfg.StateDir, "serving-kubelet.key"),
+	}
+	if err := ensureControllerClientMaterial(ctx, bootstrapClient, state, statePath); err != nil {
+		return nil, nil, err
 	}
 	if err := ensureKubeletServerMaterial(ctx, bootstrapClient, state, statePath, cfg.NodeName, cfg.NodeIP); err != nil {
 		return nil, nil, err

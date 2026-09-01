@@ -68,6 +68,7 @@ func runJoin(cfg JoinConfig) error {
 		log.Printf("Kubernetes has not assigned a PodCIDR yet; continuing without starting VXLAN")
 	}
 	var peerClient *APIClient
+	var cleanupClient *APIClient
 	var peers []FlannelPeer
 	var gatewayMAC string
 	if cfg.VXLANBinary != "" && cfg.VXLANGatewayMAC == "" {
@@ -143,18 +144,14 @@ func runJoin(cfg JoinConfig) error {
 		}()
 		if !cfg.Once && cfg.DNSResolver {
 			dnsResolver = newClusterDNSResolver(cfg.useSudo)
-			if peerClient == nil {
-				peerClient, err = peerAPIClient(cfg, state)
-				if err != nil {
-					log.Printf("warning: cluster DNS resolver unavailable: %v", err)
-				}
+			resolverErr := dnsResolver.reconcile(ctx, client)
+			if resolverErr != nil && cleanupClient != nil {
+				resolverErr = dnsResolver.reconcile(ctx, cleanupClient)
 			}
-			if peerClient != nil {
-				if resolverErr := dnsResolver.reconcile(ctx, peerClient); resolverErr != nil {
-					log.Printf("warning: configure cluster DNS resolver: %v", resolverErr)
-				} else {
-					log.Printf("configured macOS resolver %s for cluster DNS via %s", dnsResolver.path, strings.Join(dnsResolver.nameservers, ", "))
-				}
+			if resolverErr != nil {
+				log.Printf("warning: configure cluster DNS resolver: %v", resolverErr)
+			} else {
+				log.Printf("configured macOS resolver %s for cluster DNS via %s", dnsResolver.path, strings.Join(dnsResolver.nameservers, ", "))
 			}
 			defer func() {
 				cleanupContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -168,20 +165,20 @@ func runJoin(cfg JoinConfig) error {
 	var cleanupStaleNativePods func(context.Context, []Pod)
 	if !cfg.Once && workloads != nil {
 		// The system:node identity is intentionally not allowed to delete Pods.
-		// Reuse the separately configured peer identity for force-deleting native
-		// Pods whose graceful deletion has outlived the kubelet grace period.
-		if peerClient == nil && (cfg.PeerKubeconfig != "" || state.PeerKubeconfig != "") {
-			peerClient, err = peerAPIClient(cfg, state)
-			if err != nil {
-				log.Printf("warning: stale native Pod cleanup unavailable: %v", err)
-			}
+		// Reuse only an explicitly configured peer identity for force-deleting
+		// native Pods whose graceful deletion has outlived the kubelet grace period;
+		// the K3s controller certificate is read-only for this purpose.
+		if configured, found, peerErr := configuredPeerAPIClient(cfg, state); peerErr != nil {
+			log.Printf("warning: stale native Pod cleanup unavailable: %v", peerErr)
+		} else if found {
+			cleanupClient = configured
 		}
 		var cleanupWarningAt time.Time
 		cleanupStaleNativePods = func(cleanupContext context.Context, pods []Pod) {
-			if peerClient == nil {
+			if cleanupClient == nil {
 				return
 			}
-			removed, cleanupErr := cleanupPodList(cleanupContext, peerClient, pods, state.NodeName, defaultNativePodCleanupStaleAfter, time.Now())
+			removed, cleanupErr := cleanupPodList(cleanupContext, cleanupClient, pods, state.NodeName, defaultNativePodCleanupStaleAfter, time.Now())
 			if removed > 0 {
 				log.Printf("removed %d stale native Pod(s) assigned to %s", removed, state.NodeName)
 			}
@@ -260,8 +257,12 @@ func runJoin(cfg JoinConfig) error {
 			cancel()
 			return nil
 		case <-ticker.C:
-			if dnsResolver != nil && peerClient != nil {
-				if resolverErr := dnsResolver.reconcile(ctx, peerClient); resolverErr != nil {
+			if dnsResolver != nil {
+				resolverErr := dnsResolver.reconcile(ctx, client)
+				if resolverErr != nil && cleanupClient != nil {
+					resolverErr = dnsResolver.reconcile(ctx, cleanupClient)
+				}
+				if resolverErr != nil {
 					log.Printf("warning: refresh cluster DNS resolver: %v", resolverErr)
 				}
 			}

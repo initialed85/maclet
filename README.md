@@ -48,10 +48,12 @@ wrapper around the implementation in `pkg/maclet`; `pkg/kube` owns the narrow
 HTTPS transport and aliases the upstream Kubernetes API objects (`core/v1`,
 `coordination/v1`, and
 `metav1`). maclet still uses a deliberately small HTTP surface rather than
-client-go. When automatic VXLAN peer discovery is enabled, it parses the
-selected kubeconfig directly and does not require a locally installed
-`kubectl`. A static `--vxlan-gateway-mac` override remains available when a
-separate peer credential is not wanted.
+client-go. K3s join bootstrap obtains the controller client
+certificate used for automatic VXLAN peer discovery directly with the join
+token; no kubeconfig or locally installed `kubectl` is required. An explicit
+`--peer-kubeconfig` remains available as an override for unusual clusters and
+for privileged cleanup operations. A static `--vxlan-gateway-mac` override is
+also available for single-peer operation.
 
 ## CI and releases
 
@@ -128,23 +130,26 @@ On first join maclet:
    certificate;
 4. creates the Node and waits for the Kubernetes controller-manager to assign a
    PodCIDR;
-5. when VXLAN is enabled, starts `darwin-vxlan`, discovers its bridge MAC,
-   reads the selected Linux Flannel gateway MAC through the peer kubeconfig,
-   installs local Pod/Service routes, and publishes the Flannel Node
-   annotations;
-6. for a long-running VXLAN join, discovers the `kube-dns` Service through
-   the peer client and configures `/etc/resolver/cluster.local`;
-7. updates the Node status and creates the matching `kube-node-lease` Lease.
+5. requests the `system:k3s-controller` client certificate directly from the
+   K3s agent endpoint using the join token;
+6. when VXLAN is enabled, starts `darwin-vxlan`, discovers its bridge MAC,
+   reads Linux Flannel peer annotations with that controller identity, installs
+   local Pod/Service routes, and publishes the Flannel Node annotations;
+7. for a long-running VXLAN join, reads the `kube-dns` Service with the node
+   client and configures `/etc/resolver/cluster.local`;
+8. updates the Node status and creates the matching `kube-node-lease` Lease.
 
 The client key, certificate, CA, node password, and state metadata are stored
 under the state directory with restrictive permissions. The join token is not
 stored after bootstrap. The peer kubeconfig is not copied into state; only its
-path and optional context are persisted. When VXLAN is enabled, maclet parses
-`$KUBECONFIG` or `~/.kube/config` directly to list peer Nodes and read their
-Flannel annotations. Prefer a dedicated least-privilege kubeconfig rather than
-an administrator kubeconfig for production use. `kubectl` is not required for
-maclet bootstrap or automatic peer discovery. Reuse that same state directory
-for subsequent starts:
+path and optional context are persisted when explicitly configured. The join
+token itself is sufficient for maclet bootstrap: maclet requests the standard
+K3s controller client certificate and uses it to list peer Nodes and read their
+Flannel annotations, just as a normal K3s agent does. No kubeconfig or
+`kubectl` installation is required for joining or automatic peer discovery.
+An explicit `--peer-kubeconfig` remains useful for clusters with customized
+RBAC and for the optional stale-Pod cleanup/leave operations. Reuse that same
+state directory for subsequent starts:
 K3s stores only a hash of the per-node password, so a fresh bootstrap for an
 existing node name cannot generate a replacement password. If the state is
 lost, delete the Node and its `kube-system/<node>.node-password.k3s` Secret
@@ -481,8 +486,9 @@ made from the allocated PodCIDR (for example `10.42.4.1/24`). maclet then:
 - causes the existing Linux Flannel instances to install the Darwin PodCIDR
   route and permanent FDB entry automatically;
 - reads every eligible Linux Flannel peer's PodCIDR, public underlay IP, and
-  `flannel.1` MAC from the peer kubeconfig; use `--vxlan-gateway-mac` only as a
-  static single-peer override;
+  `flannel.1` MAC using the K3s controller client certificate; use
+  `--peer-kubeconfig` as an explicit override or `--vxlan-gateway-mac` as a
+  static single-peer fallback;
 - installs one synthetic gateway and ARP entry per discovered peer, reserves
   those addresses from workload allocation, and adds a route for each remote
   PodCIDR; the selected `--vxlan-remote` gateway handles the configured
@@ -490,11 +496,13 @@ made from the allocated PodCIDR (for example `10.42.4.1/24`). maclet then:
   macOS.
 
 The Kubernetes Node's `ExternalIP` is informational; Flannel uses its own
-`public-ip` annotation. Peer discovery uses `$KUBECONFIG` or `~/.kube/config`
-by default, and `--peer-kubeconfig`/`--peer-context` can select a dedicated
-read-only credential. `--vxlan-remote` should point at a healthy Linux Flannel
-node because it remains the ServiceCIDR and unmapped fallback peer. Clean
-shutdown removes the annotations, per-peer routes, ARP entries, and aliases
+`public-ip` annotation. Peer discovery uses the K3s-issued controller client
+certificate obtained during token bootstrap. `--peer-kubeconfig`/`--peer-context`
+can select an explicit override, while `--vxlan-gateway-mac` avoids peer
+listing for static single-peer operation. `--vxlan-remote` should point at a
+healthy Linux Flannel node because it remains the ServiceCIDR and unmapped
+fallback peer. Clean shutdown removes the annotations, per-peer routes, ARP
+entries, and aliases
 before stopping the child. An unclean kill can leave temporary host routes or
 stale remote FDB state behind; the next join automatically recovers matching
 orphaned darwin-vxlan processes and stale bridge/Pod-IP aliases for this node.

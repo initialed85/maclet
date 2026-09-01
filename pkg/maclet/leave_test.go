@@ -78,6 +78,8 @@ func TestRemoveLocalStateFiles(t *testing.T) {
 		"server-ca.crt",
 		"client-kubelet.crt",
 		"client-kubelet.key",
+		"client-k3s-controller.crt",
+		"client-k3s-controller.key",
 		"client-ca.crt",
 		"serving-kubelet.crt",
 		"serving-kubelet.key",
