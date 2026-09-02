@@ -101,6 +101,37 @@ func TestUpdateNodeStatusRetriesWithRefreshedSpecAfterTaintRestriction(t *testin
 	}
 }
 
+func TestUpdateNodeStatusPreservesTaintErrorAfterRetryLimit(t *testing.T) {
+	node := &Node{
+		ObjectMeta: ObjectMeta{Name: "maclet", ResourceVersion: "1"},
+		Spec:       NodeSpec{Taints: []Taint{{Key: managedTaintKey, Value: managedTaintValue, Effect: managedTaintEffect}}},
+	}
+	statusRequests := 0
+	server := httptest.NewTLSServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.Method == http.MethodGet {
+			if err := json.NewEncoder(response).Encode(node); err != nil {
+				t.Fatalf("encode Node: %v", err)
+			}
+			return
+		}
+		statusRequests++
+		response.WriteHeader(http.StatusForbidden)
+		_, _ = response.Write([]byte(`nodes "maclet" is not allowed to modify taints`))
+	}))
+	defer server.Close()
+	client, err := newAPIClient(server.URL, nil, "", "", true, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = updateNodeStatus(context.Background(), client, node, "192.168.137.111", "")
+	if err == nil || !isNodeTaintRestrictionError(err) {
+		t.Fatalf("update error = %v, want taint-specific error", err)
+	}
+	if statusRequests != 5 {
+		t.Fatalf("status requests = %d, want 5 bounded retries", statusRequests)
+	}
+}
+
 func TestIsNodeTaintRestrictionError(t *testing.T) {
 	err := &HTTPError{Code: http.StatusForbidden, Body: `nodes "maclet" is not allowed to modify taints`}
 	if !isNodeTaintRestrictionError(err) {

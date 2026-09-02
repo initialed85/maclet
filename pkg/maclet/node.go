@@ -275,6 +275,11 @@ func updateNodeStatus(ctx context.Context, client *APIClient, node *Node, nodeIP
 			return &updated, nil
 		}
 		if isNodeTaintRestrictionError(err) {
+			if attempt == 4 {
+				// Preserve the taint-specific cause so runJoin can defer this
+				// admission race without tearing down otherwise healthy services.
+				return nil, fmt.Errorf("update Node %q status after taint refresh retries: %w", current.ObjectMeta.Name, err)
+			}
 			// A stale full Node object can make NodeRestriction compare a changed
 			// taint set even though this is a status-only operation. Refresh the
 			// object, then retry with its complete authoritative spec. Omitting
