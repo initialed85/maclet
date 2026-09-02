@@ -228,9 +228,18 @@ func runJoin(cfg JoinConfig) error {
 			return errors.New("no Kubernetes API server accepted a kubelet remotedialer tunnel")
 		}
 	}
-	node, err = updateNodeStatus(ctx, client, node, state.NodeIP, cfg.ExternalIP)
-	if err != nil {
-		return err
+	updatedNode, statusErr := updateNodeStatus(ctx, client, node, state.NodeIP, cfg.ExternalIP)
+	if statusErr != nil {
+		if isNodeTaintRestrictionError(statusErr) {
+			// Keep the networking, kubelet, and remotedialer services alive. The
+			// next heartbeat will retry status, while the API server retains the
+			// managed taint and prevents accidental scheduling.
+			log.Printf("warning: initial Node status update deferred after NodeRestriction taint check: %v", statusErr)
+		} else {
+			return statusErr
+		}
+	} else {
+		node = updatedNode
 	}
 	if err := ensureLease(ctx, client, state.NodeName); err != nil {
 		return err
@@ -296,9 +305,15 @@ func runJoin(cfg JoinConfig) error {
 			if err := json.Unmarshal(body, &node); err != nil {
 				return err
 			}
-			node, err = updateNodeStatus(ctx, client, node, state.NodeIP, cfg.ExternalIP)
-			if err != nil {
-				return err
+			updatedNode, statusErr := updateNodeStatus(ctx, client, node, state.NodeIP, cfg.ExternalIP)
+			if statusErr != nil {
+				if isNodeTaintRestrictionError(statusErr) {
+					log.Printf("warning: Node status update deferred after NodeRestriction taint check: %v", statusErr)
+				} else {
+					return statusErr
+				}
+			} else {
+				node = updatedNode
 			}
 			if err := ensureLease(ctx, client, state.NodeName); err != nil {
 				return err

@@ -231,25 +231,41 @@ func nodeStatus(name, nodeIP, externalIP string, now time.Time) NodeStatus {
 	}
 }
 
+func nodeStatusPayload(current *Node, status NodeStatus, includeSpec bool) map[string]any {
+	metadata := map[string]any{
+		"name":            current.ObjectMeta.Name,
+		"resourceVersion": current.ObjectMeta.ResourceVersion,
+		"labels":          current.ObjectMeta.Labels,
+		"annotations":     current.ObjectMeta.Annotations,
+	}
+	if current.ObjectMeta.UID != "" {
+		metadata["uid"] = current.ObjectMeta.UID
+	}
+	payload := map[string]any{
+		"apiVersion": "v1",
+		"kind":       "Node",
+		"metadata":   metadata,
+		"status":     status,
+	}
+	if includeSpec {
+		// Preserve the current spec on the normal path. Some K3s/API-server
+		// combinations run NodeRestriction against the submitted object before
+		// the status strategy restores the persisted spec.
+		payload["spec"] = current.Spec
+	}
+	return payload
+}
+
+func isNodeTaintRestrictionError(err error) bool {
+	var apiErr *HTTPError
+	return errors.As(err, &apiErr) && apiErr.Code == http.StatusForbidden && strings.Contains(strings.ToLower(apiErr.Body), "not allowed to modify taints")
+}
+
 func updateNodeStatus(ctx context.Context, client *APIClient, node *Node, nodeIP, externalIP string) (*Node, error) {
 	current := node
 	for attempt := 0; attempt < 5; attempt++ {
 		status := nodeStatus(current.ObjectMeta.Name, nodeIP, externalIP, time.Now())
-		payload := map[string]any{
-			"apiVersion": "v1",
-			"kind":       "Node",
-			"metadata": map[string]any{
-				"name":            current.ObjectMeta.Name,
-				"resourceVersion": current.ObjectMeta.ResourceVersion,
-				"labels":          current.ObjectMeta.Labels,
-				"annotations":     current.ObjectMeta.Annotations,
-			},
-			// Include the current spec on status updates. NodeRestriction compares
-			// the submitted object as a whole and must see the existing taint and
-			// controller-assigned PodCIDR rather than an omitted/empty spec.
-			"spec":   current.Spec,
-			"status": status,
-		}
+		payload := nodeStatusPayload(current, status, true)
 		body, err := client.PutJSON(ctx, "/api/v1/nodes/"+url.PathEscape(current.ObjectMeta.Name)+"/status", payload)
 		if err == nil {
 			var updated Node
@@ -257,6 +273,23 @@ func updateNodeStatus(ctx context.Context, client *APIClient, node *Node, nodeIP
 				return nil, fmt.Errorf("decode Node status response: %w", err)
 			}
 			return &updated, nil
+		}
+		if isNodeTaintRestrictionError(err) {
+			// A stale full Node object can make NodeRestriction compare a changed
+			// taint set even though this is a status-only operation. Refresh the
+			// object, then retry with its complete authoritative spec. Omitting
+			// spec is not safe on K3s versions whose admission path compares the
+			// submitted object before the status strategy restores persisted fields.
+			latest, getErr := client.Get(ctx, "/api/v1/nodes/"+url.PathEscape(current.ObjectMeta.Name))
+			if getErr != nil {
+				return nil, fmt.Errorf("refresh Node after taint restriction: %w", getErr)
+			}
+			var refreshed Node
+			if getErr := json.Unmarshal(latest, &refreshed); getErr != nil {
+				return nil, fmt.Errorf("decode Node after taint restriction: %w", getErr)
+			}
+			current = &refreshed
+			continue
 		}
 		var conflict *HTTPError
 		if !errors.As(err, &conflict) || conflict.Code != http.StatusConflict || attempt == 4 {
