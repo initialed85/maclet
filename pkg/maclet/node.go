@@ -231,7 +231,7 @@ func nodeStatus(name, nodeIP, externalIP string, now time.Time) NodeStatus {
 	}
 }
 
-func nodeStatusPayload(current *Node, status NodeStatus, includeSpec bool) map[string]any {
+func nodeStatusPayload(current *Node, status NodeStatus) map[string]any {
 	metadata := map[string]any{
 		"name":            current.ObjectMeta.Name,
 		"resourceVersion": current.ObjectMeta.ResourceVersion,
@@ -241,19 +241,20 @@ func nodeStatusPayload(current *Node, status NodeStatus, includeSpec bool) map[s
 	if current.ObjectMeta.UID != "" {
 		metadata["uid"] = current.ObjectMeta.UID
 	}
-	payload := map[string]any{
+	return map[string]any{
 		"apiVersion": "v1",
 		"kind":       "Node",
 		"metadata":   metadata,
+		"spec":       current.Spec,
 		"status":     status,
 	}
-	if includeSpec {
-		// Preserve the current spec on the normal path. Some K3s/API-server
-		// combinations run NodeRestriction against the submitted object before
-		// the status strategy restores the persisted spec.
-		payload["spec"] = current.Spec
+}
+
+func nodeStatusPatchPayload(current *Node, status NodeStatus) map[string]any {
+	return map[string]any{
+		"metadata": map[string]any{"resourceVersion": current.ObjectMeta.ResourceVersion},
+		"status":   status,
 	}
-	return payload
 }
 
 func isNodeTaintRestrictionError(err error) bool {
@@ -261,18 +262,72 @@ func isNodeTaintRestrictionError(err error) bool {
 	return errors.As(err, &apiErr) && apiErr.Code == http.StatusForbidden && strings.Contains(strings.ToLower(apiErr.Body), "not allowed to modify taints")
 }
 
+func statusPatchNeedsFullFallback(err error) bool {
+	if isNodeTaintRestrictionError(err) {
+		return true
+	}
+	var apiErr *HTTPError
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	switch apiErr.Code {
+	case http.StatusNotFound, http.StatusMethodNotAllowed, http.StatusUnsupportedMediaType, http.StatusNotImplemented:
+		return true
+	default:
+		return false
+	}
+}
+
+func decodeNodeStatusResponse(body []byte) (*Node, error) {
+	var updated Node
+	if err := json.Unmarshal(body, &updated); err != nil {
+		return nil, fmt.Errorf("decode Node status response: %w", err)
+	}
+	return &updated, nil
+}
+
+func refreshNode(ctx context.Context, client *APIClient, nodeName, reason string) (*Node, error) {
+	latest, err := client.Get(ctx, "/api/v1/nodes/"+url.PathEscape(nodeName))
+	if err != nil {
+		return nil, fmt.Errorf("refresh Node after %s: %w", reason, err)
+	}
+	var refreshed Node
+	if err := json.Unmarshal(latest, &refreshed); err != nil {
+		return nil, fmt.Errorf("decode Node after %s: %w", reason, err)
+	}
+	return &refreshed, nil
+}
+
 func updateNodeStatus(ctx context.Context, client *APIClient, node *Node, nodeIP, externalIP string) (*Node, error) {
 	current := node
 	for attempt := 0; attempt < 5; attempt++ {
 		status := nodeStatus(current.ObjectMeta.Name, nodeIP, externalIP, time.Now())
-		payload := nodeStatusPayload(current, status, true)
-		body, err := client.PutJSON(ctx, "/api/v1/nodes/"+url.PathEscape(current.ObjectMeta.Name)+"/status", payload)
+		body, err := client.PatchJSON(ctx, "/api/v1/nodes/"+url.PathEscape(current.ObjectMeta.Name)+"/status", nodeStatusPatchPayload(current, status))
 		if err == nil {
-			var updated Node
-			if err := json.Unmarshal(body, &updated); err != nil {
-				return nil, fmt.Errorf("decode Node status response: %w", err)
-			}
-			return &updated, nil
+			return decodeNodeStatusResponse(body)
+		}
+		if statusPatchNeedsFullFallback(err) {
+			return updateNodeStatusWithFullPut(ctx, client, current, nodeIP, externalIP)
+		}
+		var conflict *HTTPError
+		if !errors.As(err, &conflict) || conflict.Code != http.StatusConflict || attempt == 4 {
+			return nil, fmt.Errorf("patch Node %q status: %w", current.ObjectMeta.Name, err)
+		}
+		current, err = refreshNode(ctx, client, current.ObjectMeta.Name, "status conflict")
+		if err != nil {
+			return nil, err
+		}
+	}
+	return nil, errors.New("status patch retry limit exceeded")
+}
+
+func updateNodeStatusWithFullPut(ctx context.Context, client *APIClient, node *Node, nodeIP, externalIP string) (*Node, error) {
+	current := node
+	for attempt := 0; attempt < 5; attempt++ {
+		status := nodeStatus(current.ObjectMeta.Name, nodeIP, externalIP, time.Now())
+		body, err := client.PutJSON(ctx, "/api/v1/nodes/"+url.PathEscape(current.ObjectMeta.Name)+"/status", nodeStatusPayload(current, status))
+		if err == nil {
+			return decodeNodeStatusResponse(body)
 		}
 		if isNodeTaintRestrictionError(err) {
 			if attempt == 4 {
@@ -285,30 +340,20 @@ func updateNodeStatus(ctx context.Context, client *APIClient, node *Node, nodeIP
 			// object, then retry with its complete authoritative spec. Omitting
 			// spec is not safe on K3s versions whose admission path compares the
 			// submitted object before the status strategy restores persisted fields.
-			latest, getErr := client.Get(ctx, "/api/v1/nodes/"+url.PathEscape(current.ObjectMeta.Name))
-			if getErr != nil {
-				return nil, fmt.Errorf("refresh Node after taint restriction: %w", getErr)
+			current, err = refreshNode(ctx, client, current.ObjectMeta.Name, "taint restriction")
+			if err != nil {
+				return nil, err
 			}
-			var refreshed Node
-			if getErr := json.Unmarshal(latest, &refreshed); getErr != nil {
-				return nil, fmt.Errorf("decode Node after taint restriction: %w", getErr)
-			}
-			current = &refreshed
 			continue
 		}
 		var conflict *HTTPError
 		if !errors.As(err, &conflict) || conflict.Code != http.StatusConflict || attempt == 4 {
 			return nil, fmt.Errorf("update Node %q status: %w", current.ObjectMeta.Name, err)
 		}
-		latest, getErr := client.Get(ctx, "/api/v1/nodes/"+url.PathEscape(current.ObjectMeta.Name))
-		if getErr != nil {
-			return nil, fmt.Errorf("refresh Node after status conflict: %w", getErr)
+		current, err = refreshNode(ctx, client, current.ObjectMeta.Name, "status conflict")
+		if err != nil {
+			return nil, err
 		}
-		var refreshed Node
-		if getErr := json.Unmarshal(latest, &refreshed); getErr != nil {
-			return nil, fmt.Errorf("decode Node after status conflict: %w", getErr)
-		}
-		current = &refreshed
 	}
 	return nil, errors.New("status update retry limit exceeded")
 }

@@ -14,6 +14,50 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+func TestUpdateNodeStatusUsesStatusPatch(t *testing.T) {
+	node := &Node{
+		ObjectMeta: ObjectMeta{Name: "maclet", UID: "node-uid", ResourceVersion: "7"},
+		Spec:       NodeSpec{Taints: []Taint{{Key: managedTaintKey, Value: managedTaintValue, Effect: managedTaintEffect}}},
+	}
+	server := httptest.NewTLSServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodPatch || request.URL.Path != "/api/v1/nodes/maclet/status" {
+			t.Fatalf("request = %s %s", request.Method, request.URL.Path)
+		}
+		body, err := io.ReadAll(request.Body)
+		if err != nil {
+			t.Fatalf("read patch: %v", err)
+		}
+		var payload map[string]json.RawMessage
+		if err := json.Unmarshal(body, &payload); err != nil {
+			t.Fatalf("decode patch: %v", err)
+		}
+		if _, found := payload["spec"]; found {
+			t.Fatal("status patch included spec")
+		}
+		var metadata map[string]string
+		if err := json.Unmarshal(payload["metadata"], &metadata); err != nil {
+			t.Fatalf("decode patch metadata: %v", err)
+		}
+		if metadata["resourceVersion"] != "7" {
+			t.Fatalf("patch resourceVersion = %q", metadata["resourceVersion"])
+		}
+		updated := *node
+		updated.Status = nodeStatus(node.Name, "192.168.137.111", "", time.Now())
+		response.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(response).Encode(&updated); err != nil {
+			t.Fatalf("encode Node: %v", err)
+		}
+	}))
+	defer server.Close()
+	client, err := newAPIClient(server.URL, nil, "", "", true, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := updateNodeStatus(context.Background(), client, node, "192.168.137.111", ""); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestUpdateNodeStatusRetriesWithRefreshedSpecAfterTaintRestriction(t *testing.T) {
 	managedTaint := corev1.Taint{Key: managedTaintKey, Value: managedTaintValue, Effect: managedTaintEffect}
 	node := &Node{
@@ -32,6 +76,10 @@ func TestUpdateNodeStatusRetriesWithRefreshedSpecAfterTaintRestriction(t *testin
 	}
 	var requests []map[string]json.RawMessage
 	server := httptest.NewTLSServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.Method == http.MethodPatch && request.URL.Path == "/api/v1/nodes/maclet/status" {
+			response.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
 		if request.Method == http.MethodGet && request.URL.Path == "/api/v1/nodes/maclet" {
 			refreshed := *node
 			refreshed.Spec.PodCIDR = "10.42.5.0/24"
@@ -114,7 +162,12 @@ func TestUpdateNodeStatusPreservesTaintErrorAfterRetryLimit(t *testing.T) {
 			}
 			return
 		}
-		statusRequests++
+		if request.Method != http.MethodPatch && request.Method != http.MethodPut {
+			t.Fatalf("request = %s %s", request.Method, request.URL.Path)
+		}
+		if request.Method == http.MethodPut {
+			statusRequests++
+		}
 		response.WriteHeader(http.StatusForbidden)
 		_, _ = response.Write([]byte(`nodes "maclet" is not allowed to modify taints`))
 	}))
