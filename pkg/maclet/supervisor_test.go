@@ -11,6 +11,28 @@ import (
 	"time"
 )
 
+func TestAcquireDaemonLockSerializesJoinProcesses(t *testing.T) {
+	stateDir := t.TempDir()
+	first, err := acquireDaemonLock(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	if _, err := acquireDaemonLock(stateDir); !errors.Is(err, errDaemonAlreadyRunning) {
+		t.Fatalf("second daemon lock error = %v, want already-running error", err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+	third, err := acquireDaemonLock(stateDir)
+	if err != nil {
+		t.Fatalf("acquire after release: %v", err)
+	}
+	if err := third.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestRetryableJoinErrorClassifiesControlPlaneFailures(t *testing.T) {
 	for _, test := range []struct {
 		name string

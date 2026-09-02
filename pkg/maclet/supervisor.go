@@ -21,6 +21,15 @@ const (
 // resources until it exits; transient control-plane failures are retried with
 // backoff, while --once remains a single deterministic session.
 func runJoin(cfg JoinConfig) error {
+	lock, err := acquireDaemonLock(cfg.StateDir)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if closeErr := lock.Close(); closeErr != nil {
+			log.Printf("warning: release daemon lock: %v", closeErr)
+		}
+	}()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if cfg.Once {
