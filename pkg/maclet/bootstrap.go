@@ -100,6 +100,9 @@ func bootstrap(ctx context.Context, cfg JoinConfig) (*LocalState, *APIClient, er
 		if cfg.NodeName != "" && cfg.NodeName != state.NodeName {
 			return nil, nil, fmt.Errorf("state belongs to node %s, not %s", state.NodeName, cfg.NodeName)
 		}
+		if err := ensureStateInstanceID(&state, statePath); err != nil {
+			return nil, nil, err
+		}
 		client, err := newAPIClient(state.Server, mustReadFile(state.CAFile), state.ClientCert, state.ClientKey, cfg.InsecureSkipTLSVerify, "", "")
 		if err != nil {
 			return nil, nil, err
@@ -221,9 +224,13 @@ func bootstrap(ctx context.Context, cfg JoinConfig) (*LocalState, *APIClient, er
 		}
 	}
 	peerKubeconfig := expandPath(cfg.PeerKubeconfig)
+	instanceID, err := randomInstanceID()
+	if err != nil {
+		return nil, nil, fmt.Errorf("generate maclet instance ID: %w", err)
+	}
 	state := &LocalState{
 		Version: 1, Server: cfg.Server, NodeName: cfg.NodeName, NodeIP: cfg.NodeIP, ExternalIP: cfg.ExternalIP,
-		ClusterCIDR: clusterCIDR, ServiceCIDR: serviceCIDR, ClusterDNS: clusterDNS,
+		InstanceID: instanceID, ClusterCIDR: clusterCIDR, ServiceCIDR: serviceCIDR, ClusterDNS: clusterDNS,
 		PeerKubeconfig: peerKubeconfig, PeerContext: cfg.PeerContext,
 		CAFile: caFile, ClientCert: certFile, ClientKey: keyFile, PasswordFile: passwordFile,
 		ClientCA:       filepath.Join(cfg.StateDir, "client-ca.crt"),

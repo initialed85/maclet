@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -52,8 +53,11 @@ func runJoinSession(ctx context.Context, cfg JoinConfig) error {
 	if cfg.DrainTimeout <= 0 {
 		cfg.DrainTimeout = defaultDrainTimeout
 	}
-	node, err := ensureNode(ctx, client, state.NodeName, state.NodeIP)
+	node, err := ensureOwnedNode(ctx, client, state.NodeName, state.NodeIP, state.InstanceID, state.NodeUID, cfg.Adopt)
 	if err != nil {
+		return err
+	}
+	if err := persistNodeOwnership(state, filepath.Join(cfg.StateDir, "state.json"), node); err != nil {
 		return err
 	}
 	// Only remove a cordon that maclet itself installed during a previous

@@ -58,6 +58,7 @@ func runJoinCommand(args []string) error {
 	flags.StringVar(&cfg.Token, "token", "", "K3s join token (prefer --token-file to avoid process listings)")
 	flags.StringVar(&cfg.TokenFile, "token-file", "", "read K3s join token from this file, or - for stdin")
 	flags.StringVar(&cfg.NodeName, "node-name", "", "Kubernetes node name (defaults to the local hostname)")
+	flags.BoolVar(&cfg.Adopt, "adopt", false, "explicitly adopt an existing unmarked compatible Node once")
 	flags.StringVar(&cfg.NodeIP, "node-ip", "", "node/underlay IP advertised to Kubernetes (auto-detected if empty)")
 	flags.StringVar(&cfg.ExternalIP, "external-ip", "", "Kubernetes ExternalIP address (defaults to --vxlan-local or --node-ip)")
 	flags.StringVar(&cfg.StateDir, "state-dir", defaultStatePath(), "maclet state directory")

@@ -7,6 +7,8 @@ type LocalState struct {
 	Server         string   `json:"server"`
 	NodeName       string   `json:"nodeName"`
 	NodeIP         string   `json:"nodeIP"`
+	InstanceID     string   `json:"instanceID,omitempty"`
+	NodeUID        string   `json:"nodeUID,omitempty"`
 	ExternalIP     string   `json:"externalIP,omitempty"`
 	PeerKubeconfig string   `json:"peerKubeconfig,omitempty"`
 	PeerContext    string   `json:"peerContext,omitempty"`
@@ -30,6 +32,7 @@ type JoinConfig struct {
 	TokenFile             string
 	NodeName              string
 	NodeIP                string
+	Adopt                 bool
 	ExternalIP            string
 	StateDir              string
 	InsecureSkipTLSVerify bool

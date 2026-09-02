@@ -108,7 +108,10 @@ the node's underlay address in `kubectl get nodes -o wide`. The Flannel
 The default state directory is `~/.maclet`; use `--state-dir` to override it.
 When run through `sudo`, maclet keeps this path anchored to the invoking user's
 home directory and restores ownership of newly written state files to that
-user.
+user. If a pre-existing unmarked but compatible Darwin Node must be claimed,
+add `--adopt` to exactly one join invocation; maclet records its ownership
+marker and UID before subsequent starts. It refuses to adopt a foreign
+OS/architecture shape or any Node with another maclet instance marker.
 
 For a registration/heartbeat smoke test that exits after one update:
 
@@ -139,8 +142,14 @@ On first join maclet:
    client and configures `/etc/resolver/cluster.local`;
 8. updates the Node status and creates the matching `kube-node-lease` Lease.
 
-The client key, certificate, CA, node password, and state metadata are stored
-under the state directory with restrictive permissions. The join token is not
+The client key, certificate, CA, node password, random maclet instance ID,
+Kubernetes Node UID, and state metadata are stored under the state directory
+with restrictive permissions. Each managed Node carries the same instance ID
+in the `k8s-darwin.dev/maclet-instance-id` annotation. A same-name Node with a
+different marker or persisted UID is a hard name conflict: maclet never deletes
+or overwrites it, including after a create conflict. An unmarked, compatible
+existing Node requires one explicit `--adopt` join; successful adoption writes
+the marker and UID, so later starts do not need the flag. The join token is not
 stored after bootstrap. The peer kubeconfig is not copied into state; only its
 path and optional context are persisted when explicitly configured. The join
 token itself is sufficient for maclet bootstrap: maclet requests the standard
@@ -155,9 +164,13 @@ existing node name cannot generate a replacement password. If the state is
 lost, delete the Node and its `kube-system/<node>.node-password.k3s` Secret
 before joining that name again.
 
-The daemon refreshes Node status and the Lease every 10 seconds. Stop it with
-`Ctrl-C`; the Node remains in the cluster and will eventually become `NotReady`
-until maclet is started again, as with a normal node agent.
+The daemon refreshes Node status and the Lease every 10 seconds. A state-dir
+advisory lock prevents two maclet joins from racing the same Node and native
+runtime. Normal joins retry transient bootstrap/control-plane failures with
+bounded backoff and retain established local workloads and networking while
+the API is unavailable; `--once` remains a single strict pass. Stop a normal
+join with `Ctrl-C`; the Node remains in the cluster and will eventually become
+`NotReady` until maclet is started again, as with a normal node agent.
 
 Inspect the resulting object with:
 

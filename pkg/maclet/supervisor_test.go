@@ -45,6 +45,7 @@ func TestRetryableJoinErrorClassifiesControlPlaneFailures(t *testing.T) {
 		{name: "unauthorized", err: &HTTPError{Code: http.StatusUnauthorized}, want: false},
 		{name: "deadline", err: context.DeadlineExceeded, want: true},
 		{name: "pod cidr pending", err: errPodCIDRUnavailable, want: true},
+		{name: "node name conflict", err: errNodeNameConflict, want: false},
 		{name: "canceled", err: context.Canceled, want: false},
 		{name: "local", err: errors.New("invalid local configuration"), want: false},
 	} {

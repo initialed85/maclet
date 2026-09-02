@@ -96,6 +96,20 @@ operations that need host privileges are elevated:
 - route, ARP, and address operations; and
 - the resolver helper that writes `/etc/resolver/cluster.local`.
 
+A join takes a nonblocking advisory lock at `~/.maclet/daemon.lock` (or the
+configured state directory), preventing two local supervisors from racing one
+Node, network, or native workload runtime. The lock applies to `join`; the
+existing destructive `leave` command remains a separate operator action.
+
+Normal joins run under an outer retry supervisor with capped, deterministic
+backoff. A session that remains established for at least 30 seconds resets the
+retry attempt counter before a later reacquisition. Jitter is intentionally
+omitted until retry behavior is operationally validated. Once local runtime is
+established, transient API failures retain workloads, aliases/routes, VXLAN,
+and kubelet HTTPS while status, Lease, Pod-list, DNS, and peer reconciliation
+retry on later heartbeats. `--once` bypasses the outer supervisor and remains a
+single strict pass.
+
 ### `darwin-vxlan`
 
 The separate Rust process provides the Flannel-compatible L2 transport over
@@ -165,6 +179,11 @@ Pod-delete permission.
 7. Request K3s client-kubelet and `system:k3s-controller` certificates and
    persist the resulting state.
 8. Create or reconcile the Darwin/arm64 Node and retain its assigned PodCIDR.
+   State persists a random instance ID and the Kubernetes Node UID; the Node
+   carries the instance ID in `k8s-darwin.dev/maclet-instance-id`. A different
+   marker or persisted UID is a hard name conflict. A pre-existing unmarked but
+   compatible Node requires one explicit `--adopt`; create conflicts are read
+   back and verified rather than overwritten or deleted.
 9. Recover matching orphaned darwin-vxlan processes and stale bridge/Pod-IP
    aliases from an earlier unclean exit, then start the VXLAN transport, install
    Darwin routes/ARP state, and publish Flannel annotations.
@@ -178,6 +197,10 @@ Pod-delete permission.
 A subsequent join must reuse the original state directory. K3s stores only a
 hash of the node password, so deleting local state without deleting the
 corresponding Node and node-password Secret prevents rejoining the same name.
+The persisted instance ID and Node UID prevent a different local state
+directory from silently taking over that cluster-global Node name. If an
+owned Node is deleted, a later join may recreate it; a concurrent create is
+always fetched and ownership-checked before any metadata convergence.
 
 ## Networking model
 
