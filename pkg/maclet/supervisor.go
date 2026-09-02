@@ -13,8 +13,9 @@ import (
 )
 
 const (
-	joinRetryInitial = time.Second
-	joinRetryMax     = time.Minute
+	joinRetryInitial    = time.Second
+	joinRetryMax        = time.Minute
+	joinRetryResetAfter = 30 * time.Second
 )
 
 // runJoin supervises normal daemon sessions. A session owns local runtime
@@ -39,7 +40,13 @@ func runJoin(cfg JoinConfig) error {
 }
 
 func superviseJoin(ctx context.Context, cfg JoinConfig, session func(context.Context, JoinConfig) error, retryDelay func(int) time.Duration) error {
-	for attempt := 0; ; attempt++ {
+	return superviseJoinWithResetAfter(ctx, cfg, session, retryDelay, joinRetryResetAfter)
+}
+
+func superviseJoinWithResetAfter(ctx context.Context, cfg JoinConfig, session func(context.Context, JoinConfig) error, retryDelay func(int) time.Duration, resetAfter time.Duration) error {
+	attempt := 0
+	for {
+		started := time.Now()
 		err := session(ctx, cfg)
 		if err == nil || ctx.Err() != nil {
 			return nil
@@ -47,8 +54,12 @@ func superviseJoin(ctx context.Context, cfg JoinConfig, session func(context.Con
 		if !retryableJoinError(err) {
 			return err
 		}
+		if resetAfter > 0 && time.Since(started) >= resetAfter {
+			attempt = 0
+		}
 		delay := retryDelay(attempt)
 		log.Printf("warning: maclet session unavailable: %v; retrying in %s", err, delay)
+		attempt++
 		if err := waitForJoinRetry(ctx, delay); err != nil {
 			return nil
 		}

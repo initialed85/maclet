@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -69,6 +70,33 @@ func TestSuperviseJoinRetriesTransientSession(t *testing.T) {
 	}
 	if attempts != 3 {
 		t.Fatalf("session attempts = %d, want 3", attempts)
+	}
+}
+
+func TestSuperviseJoinResetsBackoffAfterHealthySession(t *testing.T) {
+	attempts := 0
+	var retryAttempts []int
+	err := superviseJoinWithResetAfter(context.Background(), JoinConfig{}, func(context.Context, JoinConfig) error {
+		attempts++
+		if attempts == 3 {
+			time.Sleep(2 * time.Millisecond)
+		}
+		if attempts < 4 {
+			return &HTTPError{Code: http.StatusServiceUnavailable}
+		}
+		return nil
+	}, func(attempt int) time.Duration {
+		retryAttempts = append(retryAttempts, attempt)
+		return 0
+	}, time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if attempts != 4 {
+		t.Fatalf("session attempts = %d, want 4", attempts)
+	}
+	if got, want := fmt.Sprint(retryAttempts), "[0 1 0]"; got != want {
+		t.Fatalf("retry attempts = %s, want %s after healthy session reset", got, want)
 	}
 }
 
