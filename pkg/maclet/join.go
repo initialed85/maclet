@@ -2,24 +2,16 @@ package maclet
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
 	"log"
-	"net/url"
-	"os"
-	"os/signal"
 	"strings"
-	"syscall"
 	"time"
 )
 
-func runJoin(cfg JoinConfig) error {
+func runJoinSession(ctx context.Context, cfg JoinConfig) error {
 	if err := preparePrivileges(&cfg); err != nil {
 		return err
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 	state, client, err := bootstrap(ctx, cfg)
 	if err != nil {
 		return err
@@ -213,36 +205,22 @@ func runJoin(cfg JoinConfig) error {
 				log.Printf("warning: close kubelet HTTPS server: %v", err)
 			}
 		}()
-		tunnelServers := discoverKubeletTunnelServers(ctx, client, state.Server)
-		connectedTunnels := 0
-		for _, tunnelServer := range tunnelServers {
-			tunnel, tunnelErr := startKubeletTunnel(ctx, tunnelServer, state.NodeIP, state.ClientCert, state.ClientKey, state.CAFile, defaultKubeletPort)
-			if tunnelErr != nil {
-				log.Printf("warning: kubelet tunnel to %s unavailable: %v", tunnelServer, tunnelErr)
-				continue
-			}
-			connectedTunnels++
-			defer tunnel.Close()
-		}
-		if connectedTunnels == 0 {
-			return errors.New("no Kubernetes API server accepted a kubelet remotedialer tunnel")
-		}
+		tunnelSupervisor := startKubeletTunnelSupervisor(ctx, client, state.Server, state.NodeIP, state.ClientCert, state.ClientKey, state.CAFile, defaultKubeletPort)
+		defer tunnelSupervisor.Close()
 	}
-	updatedNode, statusErr := updateNodeStatus(ctx, client, node, state.NodeIP, cfg.ExternalIP)
-	if statusErr != nil {
-		if isNodeTaintRestrictionError(statusErr) {
-			// Keep the networking, kubelet, and remotedialer services alive. The
-			// next heartbeat will retry status, while the API server retains the
-			// managed taint and prevents accidental scheduling.
-			log.Printf("warning: initial Node status update deferred after NodeRestriction taint check: %v", statusErr)
-		} else {
-			return statusErr
+	updatedNode, controlPlaneErr := reconcileNodeAndLease(ctx, client, node, state.NodeIP, cfg.ExternalIP)
+	if controlPlaneErr != nil {
+		if cfg.Once {
+			return controlPlaneErr
 		}
-	} else {
+		// Keep the networking, kubelet, and remotedialer services alive. The
+		// next heartbeat will retry status and Lease operations; all
+		// control-plane failures are nonfatal once local runtime ownership has
+		// been established.
+		log.Printf("warning: initial control-plane reconciliation deferred: %v", controlPlaneErr)
+	}
+	if updatedNode != nil {
 		node = updatedNode
-	}
-	if err := ensureLease(ctx, client, state.NodeName); err != nil {
-		return err
 	}
 	if !cfg.Once && workloads != nil {
 		if pods, listErr := listAssignedPods(ctx, client, state.NodeName); listErr != nil {
@@ -298,25 +276,12 @@ func runJoin(cfg JoinConfig) error {
 					log.Printf("warning: update Flannel gateway MAC: %v", updateErr)
 				}
 			}
-			body, err := client.Get(ctx, "/api/v1/nodes/"+url.PathEscape(state.NodeName))
-			if err != nil {
-				return fmt.Errorf("refresh Node: %w", err)
-			}
-			if err := json.Unmarshal(body, &node); err != nil {
-				return err
-			}
-			updatedNode, statusErr := updateNodeStatus(ctx, client, node, state.NodeIP, cfg.ExternalIP)
-			if statusErr != nil {
-				if isNodeTaintRestrictionError(statusErr) {
-					log.Printf("warning: Node status update deferred after NodeRestriction taint check: %v", statusErr)
-				} else {
-					return statusErr
-				}
-			} else {
+			updatedNode, controlPlaneErr := reconcileNodeAndLease(ctx, client, node, state.NodeIP, cfg.ExternalIP)
+			if updatedNode != nil {
 				node = updatedNode
 			}
-			if err := ensureLease(ctx, client, state.NodeName); err != nil {
-				return err
+			if controlPlaneErr != nil {
+				log.Printf("warning: control-plane reconciliation deferred: %v; retaining local runtime", controlPlaneErr)
 			}
 			if workloads != nil {
 				if pods, listErr := listAssignedPods(ctx, client, state.NodeName); listErr != nil {

@@ -169,6 +169,71 @@ func (t *kubeletTunnel) Close() {
 	}
 }
 
+type kubeletTunnelSupervisor struct {
+	cancel context.CancelFunc
+	done   chan struct{}
+}
+
+// startKubeletTunnelSupervisor keeps the local kubelet available even when no
+// API server accepts a remotedialer connection during startup. Each tunnel
+// reconnects internally; the supervisor periodically refreshes the API-server
+// list and adds newly discovered servers.
+func startKubeletTunnelSupervisor(ctx context.Context, client *APIClient, fallback, nodeIP, certFile, keyFile, caFile string, port int) *kubeletTunnelSupervisor {
+	return startKubeletTunnelSupervisorWithConnector(ctx, client, fallback, nodeIP, certFile, keyFile, caFile, port, 15*time.Second, startKubeletTunnel)
+}
+
+func startKubeletTunnelSupervisorWithConnector(ctx context.Context, client *APIClient, fallback, nodeIP, certFile, keyFile, caFile string, port int, interval time.Duration, connect func(context.Context, string, string, string, string, string, int) (*kubeletTunnel, error)) *kubeletTunnelSupervisor {
+	tunnelContext, cancel := context.WithCancel(ctx)
+	supervisor := &kubeletTunnelSupervisor{cancel: cancel, done: make(chan struct{})}
+	go func() {
+		defer close(supervisor.done)
+		tunnels := make(map[string]*kubeletTunnel)
+		reconcile := func() {
+			servers := discoverKubeletTunnelServers(tunnelContext, client, fallback)
+			connected := 0
+			for _, server := range servers {
+				if _, found := tunnels[server]; found {
+					connected++
+					continue
+				}
+				tunnel, err := connect(tunnelContext, server, nodeIP, certFile, keyFile, caFile, port)
+				if err != nil {
+					log.Printf("warning: kubelet tunnel to %s unavailable: %v; will retry", server, err)
+					continue
+				}
+				tunnels[server] = tunnel
+				connected++
+			}
+			if connected == 0 {
+				log.Printf("warning: no Kubernetes API server accepted a kubelet remotedialer tunnel; kubelet remains available and tunnel discovery will retry")
+			}
+		}
+		reconcile()
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-tunnelContext.Done():
+				for _, tunnel := range tunnels {
+					tunnel.Close()
+				}
+				return
+			case <-ticker.C:
+				reconcile()
+			}
+		}
+	}()
+	return supervisor
+}
+
+func (s *kubeletTunnelSupervisor) Close() {
+	if s == nil {
+		return
+	}
+	s.cancel()
+	<-s.done
+}
+
 func startKubeletServer(ctx context.Context, bindAddress string, manager *workloadManager, certFile, keyFile, clientCAFile string, port int) (*kubeletServer, error) {
 	if manager == nil {
 		return nil, errors.New("kubelet server requires a workload manager")

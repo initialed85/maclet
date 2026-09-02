@@ -11,6 +11,8 @@ import (
 	"time"
 )
 
+var errPodCIDRUnavailable = errors.New("PodCIDR is not assigned")
+
 func startVXLAN(ctx context.Context, cfg JoinConfig, node *Node, peers []FlannelPeer) (*VXLANHandle, error) {
 	if cfg.VXLANBinary == "" {
 		return nil, nil
@@ -23,7 +25,7 @@ func startVXLAN(ctx context.Context, cfg JoinConfig, node *Node, peers []Flannel
 		cidr = node.Spec.PodCIDRs[0]
 	}
 	if cidr == "" {
-		return nil, errors.New("cannot start VXLAN until Kubernetes assigns this node a PodCIDR")
+		return nil, fmt.Errorf("%w: cannot start VXLAN until Kubernetes assigns this node a PodCIDR", errPodCIDRUnavailable)
 	}
 	bridgeCIDR, err := bridgeAddressForCIDR(cidr)
 	if err != nil {
