@@ -1,7 +1,7 @@
 # maclet architecture
 
 maclet is a Darwin node agent for an existing Kubernetes/K3s cluster. It lets
-an Apple Silicon Mac participate in scheduling, networking, workload status,
+an Intel or Apple Silicon Mac participate in scheduling, networking, workload status,
 logs, and exec without pretending that a native macOS process is an isolated
 Linux container.
 
@@ -178,7 +178,8 @@ Pod-delete permission.
 6. Generate or reuse the persisted per-node password and client key material.
 7. Request K3s client-kubelet and `system:k3s-controller` certificates and
    persist the resulting state.
-8. Create or reconcile the Darwin/arm64 Node and retain its assigned PodCIDR.
+8. Create or reconcile the Darwin Node for the host architecture (`arm64` or
+   `amd64`) and retain its assigned PodCIDR.
    State persists a random instance ID and the Kubernetes Node UID; the Node
    carries the instance ID in `k8s-darwin.dev/maclet-instance-id`. A different
    marker or persisted UID is a hard name conflict. A pre-existing unmarked but

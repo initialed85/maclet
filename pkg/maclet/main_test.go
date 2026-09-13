@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -279,8 +280,8 @@ func TestDesiredNode(t *testing.T) {
 	if node.ObjectMeta.Labels["kubernetes.io/os"] != "darwin" {
 		t.Errorf("OS label = %q, want darwin", node.ObjectMeta.Labels["kubernetes.io/os"])
 	}
-	if node.ObjectMeta.Labels["kubernetes.io/arch"] != "arm64" {
-		t.Errorf("arch label = %q, want darwin", node.ObjectMeta.Labels["kubernetes.io/arch"])
+	if node.ObjectMeta.Labels["kubernetes.io/arch"] != runtime.GOARCH {
+		t.Errorf("arch label = %q, want %s", node.ObjectMeta.Labels["kubernetes.io/arch"], runtime.GOARCH)
 	}
 	if !hasManagedTaint(node.Spec.Taints) {
 		t.Fatalf("Node taints = %#v, want managed NoSchedule taint", node.Spec.Taints)

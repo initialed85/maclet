@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -68,7 +69,7 @@ func runJoinSession(ctx context.Context, cfg JoinConfig) error {
 			return err
 		}
 	}
-	log.Printf("Node %s registered with labels kubernetes.io/os=darwin kubernetes.io/arch=arm64 and taint %s=%s:NoSchedule", state.NodeName, managedTaintKey, managedTaintValue)
+	log.Printf("Node %s registered with labels kubernetes.io/os=darwin kubernetes.io/arch=%s and taint %s=%s:NoSchedule", state.NodeName, runtime.GOARCH, managedTaintKey, managedTaintValue)
 	node, err = waitForPodCIDR(ctx, client, node, 60*time.Second)
 	if err != nil {
 		return fmt.Errorf("wait for PodCIDR: %w", err)

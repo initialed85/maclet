@@ -33,7 +33,7 @@ const (
 
 func desiredNode(name, nodeIP string) Node {
 	labels := map[string]string{
-		"kubernetes.io/arch": "arm64",
+		"kubernetes.io/arch": runtime.GOARCH,
 		"kubernetes.io/os":   "darwin",
 		managedLabelKey:      managedLabelValue,
 	}
@@ -156,7 +156,7 @@ func nodeStatus(name, nodeIP, externalIP string, now time.Time) NodeStatus {
 		},
 		DaemonEndpoints: corev1.NodeDaemonEndpoints{KubeletEndpoint: corev1.DaemonEndpoint{Port: defaultKubeletPort}},
 		NodeInfo: NodeInfo{
-			Architecture:            "arm64",
+			Architecture:            runtime.GOARCH,
 			OperatingSystem:         "darwin",
 			KernelVersion:           kernel,
 			OSImage:                 osImage,

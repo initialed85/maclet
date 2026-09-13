@@ -1,6 +1,6 @@
 # maclet
 
-`maclet` is an experimental Darwin/Apple Silicon Kubernetes node agent. Its
+`maclet` is an experimental macOS Darwin Kubernetes node agent. Its
 purpose is to let a macOS host participate in a K3s cluster and run selected
 native workloads before there is a full Darwin container implementation.
 
@@ -9,7 +9,7 @@ Current capabilities include:
 - authenticate to K3s with the cluster join token;
 - obtain a node client certificate from K3s;
 - create and maintain a Kubernetes `Node` object;
-- advertise `darwin`/`arm64`, CPU/memory capacity, and report `Ready` heartbeats and Leases;
+- advertise `darwin` with the host architecture (`arm64` or `amd64`), CPU/memory capacity, and report `Ready` heartbeats and Leases;
 - retain the controller-assigned PodCIDR;
 - optionally participate in the K3s Flannel VXLAN network;
 - publish the node's InternalIP, ExternalIP, and `macker://trusted-native`
@@ -29,7 +29,7 @@ ordinary workloads on it:
 
 ```text
 label: kubernetes.io/os=darwin
-label: kubernetes.io/arch=arm64
+label: kubernetes.io/arch=<arm64-or-amd64>
 label: k8s-darwin.dev/native=true
 taint: k8s-darwin.dev/native=true:NoSchedule
 ```
@@ -60,7 +60,9 @@ also available for single-peer operation.
 `.github/workflows/release.yml` uses a build-numbered release pattern.
 GitHub Actions runs the Go tests, vet, and
 lifecycle-script syntax check, then cross-compiles the root `maclet` executable
-for Darwin/arm64 with CGO disabled. It uploads a tarball and SHA-256 checksum
+for Darwin/arm64 with CGO disabled. The umbrella Macgrubernetes build also
+cross-compiles and packages Darwin/amd64 for Intel Macs. It uploads a tarball
+and SHA-256 checksum
 as an artifact. Pushes to `master` and manual workflow runs also create a
 GitHub release tagged `build-N`, where `N` is the Actions run number; pull
 requests run the checks and build but do not publish a release.

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"runtime"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -82,7 +83,7 @@ func validateAdoptableNode(node *Node, name string) error {
 	if value := labels["kubernetes.io/os"]; value != "" && value != "darwin" {
 		return nodeOwnershipConflict(name, fmt.Sprintf("has incompatible kubernetes.io/os label %q", value))
 	}
-	if value := labels["kubernetes.io/arch"]; value != "" && value != "arm64" {
+	if value := labels["kubernetes.io/arch"]; value != "" && value != runtime.GOARCH {
 		return nodeOwnershipConflict(name, fmt.Sprintf("has incompatible kubernetes.io/arch label %q", value))
 	}
 	if value := labels[managedLabelKey]; value != "" && value != managedLabelValue {
