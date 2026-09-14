@@ -262,8 +262,11 @@ Every reconciliation pass:
 1. lists Pods assigned to the registered Node;
 2. handles deletion and terminal lifecycle state;
 3. allocates or validates a PodCIDR address alias;
-4. validates supported volumes, environment, ports, and image configuration;
-5. constructs and logs a reproducible Macker invocation in debug mode;
+4. resolves supported ConfigMap/Secret environment sources and downward-API
+   field references through the authorized peer client, then validates
+   supported volumes, environment, ports, and image configuration;
+5. constructs a reproducible Macker invocation, redacting environment values
+   in debug output;
 6. launches a detached Macker workload and verifies its inspected lifecycle
    state rather than trusting the launcher alone;
 7. persists ownership before considering the workload healthy; and
@@ -271,9 +274,11 @@ Every reconciliation pass:
    and exit metadata.
 
 The ownership journal allows startup reconciliation to remove orphaned Macker
-containers and IP aliases after a daemon crash. A separate cleanup controller
-can force-delete old terminating native Pod objects using a narrowly scoped
-cluster identity; maclet itself does not broaden the node identity with general
+containers and IP aliases after a daemon crash. ConfigMap and Secret lookups
+use the controller or explicitly configured peer API identity; the restricted
+system:node identity is not broadened. A separate cleanup controller can
+force-delete old terminating native Pod objects using a narrowly scoped cluster
+identity; maclet itself does not broaden the node identity with general
 Pod-delete permission.
 
 ## Kubelet streaming

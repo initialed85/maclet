@@ -63,6 +63,7 @@ type workloadManager struct {
 	network      *DarwinNetworkHandle
 	mackerBinary string
 	nodeIP       string
+	apiClient    *APIClient
 	journalPath  string
 	workloads    map[string]*managedWorkload
 	debug        bool

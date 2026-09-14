@@ -352,8 +352,8 @@ only for the direct-port fallback. It invokes:
 ```text
 macker run --detach --net=external --interface <vxlan-bridge> --ip <pod-ip>
   --host-interface <vxlan-bridge> --host-ip <bridge-ip> --name <generated-name>
-  [-v HOST:CONTAINER ...] [--env KEY=VALUE ...] [--entrypoint COMMAND]
-  [-p CONTAINER_PORT:auto/tcp|udp ...] IMAGE [-- ARGS...]
+  [--workdir IMAGE_PATH] [-v HOST:CONTAINER ...] [--env KEY=VALUE ...]
+  [--entrypoint COMMAND] [-p CONTAINER_PORT:auto/tcp|udp ...] IMAGE [-- ARGS...]
 ```
 
 By default, each TCP/UDP container port becomes a Macker mapping such as
@@ -377,9 +377,13 @@ slice supports writable `hostPath` volumes through Macker's live symlink-backed
 file content, use a `Directory` hostPath plus `subPath` and mount the file at
 its full destination (for example, `/usr/share/nginx/html/index.html`), or use
 a `File` hostPath without `subPath`. Macker cannot enforce read-only mounts, so `readOnly` and `subPathExpr` mounts
-are rejected. Multiple containers, non-hostPath volume sources, `valueFrom`
-environment entries, custom working directories, and `hostPort` mappings are
-also rejected. With a recent Macker, maclet records the actual exit code and
+are rejected. Multiple containers, non-hostPath volume sources, unsupported
+`valueFrom` sources, and `hostPort` mappings are also rejected. An absolute
+`workingDir` is passed to Macker and overrides the image working directory.
+`envFrom` supports ConfigMap and Secret references through the authorized peer
+API client, and downward-API `fieldRef` supports Pod identity, node/IP,
+labels, and annotations. Missing required references and unsupported field
+sources remain Pending. With a recent Macker, maclet records the actual exit code and
 termination timestamps in the Kubernetes container status; older Macker
 binaries retain the previous status-only fallback. Supply `--macker-binary` to
 `join` when Macker is not on `PATH`; missing Darwin images are pulled lazily
@@ -402,7 +406,8 @@ kubectl --context home-dev -n default exec -it POD -c CONTAINER -- EXECUTABLE AR
 required to contain `/bin/sh`. Logs are streamed from Macker's detached log
 capture. Exec uses Kubernetes SPDY stream multiplexing and delegates each
 command to `macker exec`, with the
-Pod's environment and working directory configuration. Resource metrics are
+Pod's environment and working directory configuration. Debug invocation output
+redacts all environment values. Resource metrics are
 served from the same endpoint at `/metrics/resource`: node CPU/memory comes
 from macOS host statistics, while managed native Pods report the Macker
 launcher/process-tree CPU time and resident memory. With the cluster's

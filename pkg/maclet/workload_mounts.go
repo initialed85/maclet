@@ -1,6 +1,7 @@
 package maclet
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -207,6 +208,10 @@ func mackerVolumeArgs(pod Pod, container ContainerSpec) ([]string, error) {
 }
 
 func (m *workloadManager) runArgs(pod Pod, container ContainerSpec, managed *managedWorkload) ([]string, error) {
+	return m.runArgsWithContext(context.Background(), pod, container, managed)
+}
+
+func (m *workloadManager) runArgsWithContext(ctx context.Context, pod Pod, container ContainerSpec, managed *managedWorkload) ([]string, error) {
 	if container.Image == "" {
 		return nil, errors.New("container image is empty")
 	}
@@ -250,19 +255,17 @@ func (m *workloadManager) runArgs(pod Pod, container ContainerSpec, managed *man
 	if workingDir != "" {
 		args = append(args, "--workdir", workingDir)
 	}
+	environment, err := m.resolveContainerEnvironment(ctx, pod, container, managed)
+	if err != nil {
+		return nil, err
+	}
+	for _, value := range environment {
+		args = append(args, "--env", value)
+	}
 	// Native workloads use per-Pod PF remapping by default. Opt out only for
 	// images that cannot consume the MACKER_PORT_N value (for example, an
 	// application with a hard-coded listener port).
 	portForward := pod.ObjectMeta.Annotations[nativeDisablePortForwardAnnotation] != "true"
-	for _, env := range container.Env {
-		if env.Name == "" {
-			return nil, errors.New("container environment variable has an empty name")
-		}
-		if env.ValueFrom != nil {
-			return nil, fmt.Errorf("container environment variable %q uses valueFrom, which maclet does not support yet", env.Name)
-		}
-		args = append(args, "--env", env.Name+"="+env.Value)
-	}
 	for index, port := range container.Ports {
 		if port.HostPort != 0 {
 			return nil, fmt.Errorf("container port %d requests hostPort %d; maclet does not support host-port mapping yet", port.ContainerPort, port.HostPort)

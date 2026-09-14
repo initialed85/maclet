@@ -272,7 +272,7 @@ func (m *workloadManager) reconcile(ctx context.Context, client *APIClient, pods
 				}
 			}
 		}
-		args, err := m.runArgs(*pod, pod.Spec.Containers[0], managed)
+		args, err := m.runArgsWithContext(ctx, *pod, pod.Spec.Containers[0], managed)
 		if err != nil {
 			if m.debug {
 				log.Printf("debug: cannot construct Macker invocation for %s/%s: %v", pod.ObjectMeta.Namespace, pod.ObjectMeta.Name, err)
@@ -285,7 +285,7 @@ func (m *workloadManager) reconcile(ctx context.Context, client *APIClient, pods
 			continue
 		}
 		if m.debug {
-			log.Printf("debug: Macker invocation for %s/%s: %s", pod.ObjectMeta.Namespace, pod.ObjectMeta.Name, formatCommandArgs(args))
+			log.Printf("debug: Macker invocation for %s/%s: %s", pod.ObjectMeta.Namespace, pod.ObjectMeta.Name, redactMackerArgs(args))
 		}
 		if err := m.startMackerWorkload(args, pod.Spec.Containers[0].Image); err != nil {
 			reconcileErrors = append(reconcileErrors, fmt.Errorf("start Macker workload %s/%s: %w", pod.ObjectMeta.Namespace, pod.ObjectMeta.Name, err))
