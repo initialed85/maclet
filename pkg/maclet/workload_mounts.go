@@ -212,6 +212,12 @@ func (m *workloadManager) runArgs(pod Pod, container ContainerSpec, managed *man
 }
 
 func (m *workloadManager) runArgsWithContext(ctx context.Context, pod Pod, container ContainerSpec, managed *managedWorkload) ([]string, error) {
+	if err := validateNativePodNetwork(pod); err != nil {
+		return nil, err
+	}
+	if pod.Spec.HostNetwork {
+		return m.hostNetworkRunArgs(ctx, pod, container, managed)
+	}
 	if container.Image == "" {
 		return nil, errors.New("container image is empty")
 	}
@@ -283,6 +289,74 @@ func (m *workloadManager) runArgsWithContext(ctx context.Context, pod Pod, conta
 		// Macker allocates a unique process port and PF-redirects PodIP:port
 		// to it, allowing overlapping rollout generations. An explicitly
 		// opted-out workload receives its declared port directly instead.
+		if portForward {
+			args = append(args, "-p", fmt.Sprintf("%d:auto/%s", port.ContainerPort, strings.ToLower(protocol)))
+		} else {
+			args = append(args, "--env", fmt.Sprintf("MACKER_PORT_%d=%d", index+1, port.ContainerPort))
+		}
+	}
+	if len(container.Command) > 0 {
+		args = append(args, "--entrypoint", container.Command[0])
+	}
+	args = append(args, container.Image)
+	overrideLength := len(container.Args)
+	if len(container.Command) > 1 {
+		overrideLength += len(container.Command) - 1
+	}
+	commandOverride := make([]string, 0, overrideLength)
+	if len(container.Command) > 1 {
+		commandOverride = append(commandOverride, container.Command[1:]...)
+	}
+	commandOverride = append(commandOverride, container.Args...)
+	if len(commandOverride) > 0 {
+		args = append(args, "--")
+		args = append(args, commandOverride...)
+	}
+	return args, nil
+}
+
+func (m *workloadManager) hostNetworkRunArgs(ctx context.Context, pod Pod, container ContainerSpec, managed *managedWorkload) ([]string, error) {
+	if container.Image == "" {
+		return nil, errors.New("container image is empty")
+	}
+	workingDir := ""
+	if container.WorkingDir != "" {
+		if !filepath.IsAbs(container.WorkingDir) {
+			return nil, fmt.Errorf("container %q workingDir %q must be an absolute path", container.Name, container.WorkingDir)
+		}
+		workingDir = filepath.Clean(container.WorkingDir)
+	}
+	volumeArgs, err := m.mackerVolumeArgsWithContext(ctx, pod, container, managed)
+	if err != nil {
+		return nil, fmt.Errorf("container %q: %w", container.Name, err)
+	}
+	environment, err := m.resolveContainerEnvironment(ctx, pod, container, managed)
+	if err != nil {
+		return nil, err
+	}
+	args := []string{"run", "--detach", "--net=host", "--name", managed.ContainerName}
+	if workingDir != "" {
+		args = append(args, "--workdir", workingDir)
+	}
+	args = append(args, volumeArgs...)
+	for _, value := range environment {
+		args = append(args, "--env", value)
+	}
+	portForward := pod.ObjectMeta.Annotations[nativeDisablePortForwardAnnotation] != "true"
+	for index, port := range container.Ports {
+		if port.HostPort != 0 {
+			return nil, fmt.Errorf("container port %d requests hostPort %d; maclet does not support host-port mapping yet", port.ContainerPort, port.HostPort)
+		}
+		if port.ContainerPort < 1 || port.ContainerPort > 65535 {
+			return nil, fmt.Errorf("container port %d is outside the valid range", port.ContainerPort)
+		}
+		protocol := strings.ToUpper(string(port.Protocol))
+		if protocol == "" {
+			protocol = "TCP"
+		}
+		if protocol != "TCP" && protocol != "UDP" {
+			return nil, fmt.Errorf("container port %d uses unsupported protocol %q", port.ContainerPort, port.Protocol)
+		}
 		if portForward {
 			args = append(args, "-p", fmt.Sprintf("%d:auto/%s", port.ContainerPort, strings.ToLower(protocol)))
 		} else {

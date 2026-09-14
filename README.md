@@ -354,6 +354,9 @@ macker run --detach --net=external --interface <vxlan-bridge> --ip <pod-ip>
   --host-interface <vxlan-bridge> --host-ip <bridge-ip> --name <generated-name>
   [--workdir IMAGE_PATH] [-v HOST:CONTAINER ...] [--env KEY=VALUE ...]
   [--entrypoint COMMAND] [-p CONTAINER_PORT:auto/tcp|udp ...] IMAGE [-- ARGS...]
+
+Host-network Pods instead use `macker run --detach --net=host --name ...` and
+omit the external interface/IP flags.
 ```
 
 By default, each TCP/UDP container port becomes a Macker mapping such as
@@ -383,7 +386,10 @@ hostPath `readOnly` and `subPathExpr` mounts are rejected; ConfigMap read-only
 mounts are accepted but remain trusted writable copies. Multiple containers,
 unsupported volume sources, unsupported `valueFrom` sources, and `hostPort`
 mappings are also rejected. An absolute `workingDir` is passed to Macker and
-overrides the image working directory. `envFrom` supports ConfigMap and Secret
+overrides the image working directory. `hostNetwork: true` is supported with
+`dnsPolicy: ClusterFirstWithHostNet`; it uses Macker host networking, reports
+the node IP as both PodIP and HostIP, and does not allocate a PodCIDR alias.
+Other host-network DNS policies remain Pending. `envFrom` supports ConfigMap and Secret
 references through the authorized peer API client, and downward-API `fieldRef`
 supports Pod identity, node/IP, labels, and annotations. Missing required
 references and unsupported field sources remain Pending. The controller

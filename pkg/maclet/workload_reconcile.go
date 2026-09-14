@@ -43,7 +43,7 @@ func (m *workloadManager) removeWorkload(workload *managedWorkload) error {
 	if err := m.stopContainer(workload); err != nil {
 		cleanupErrors = append(cleanupErrors, err)
 	}
-	if workload.IP != "" && m.network != nil {
+	if workload.IP != "" && m.network != nil && !workload.HostNetwork {
 		if err := m.network.removeWorkloadIP(workload.IP); err != nil {
 			cleanupErrors = append(cleanupErrors, err)
 		}
@@ -73,9 +73,6 @@ func listAssignedPods(ctx context.Context, client *APIClient, nodeName string) (
 func (m *workloadManager) reconcile(ctx context.Context, client *APIClient, pods []Pod) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.network == nil {
-		return nil
-	}
 	used := make(map[string]bool)
 	for _, pod := range pods {
 		if pod.Status.PodIP != "" {
@@ -101,6 +98,7 @@ func (m *workloadManager) reconcile(ctx context.Context, client *APIClient, pods
 					PodContainerName: firstPodContainerName(*pod),
 					ContainerName:    workloadContainerName(*pod),
 					IP:               pod.Status.PodIP,
+					HostNetwork:      pod.Spec.HostNetwork,
 				}
 			}
 			if err := m.removeWorkload(workload); err != nil {
@@ -127,6 +125,17 @@ func (m *workloadManager) reconcile(ctx context.Context, client *APIClient, pods
 			continue
 		}
 		seen[uid] = true
+		if err := validateNativePodNetwork(*pod); err != nil {
+			reconcileErrors = append(reconcileErrors, err)
+			_ = m.updateStatus(ctx, client, pod, "Pending", pod.Status.PodIP, "MacletUnsupportedPod", err.Error(), false, 0)
+			continue
+		}
+		if m.network == nil {
+			err := errors.New("Darwin workload networking is not available; join with VXLAN enabled")
+			reconcileErrors = append(reconcileErrors, err)
+			_ = m.updateStatus(ctx, client, pod, "Pending", pod.Status.PodIP, "MacletNetworkSetupFailed", err.Error(), false, 0)
+			continue
+		}
 		if len(pod.Spec.Containers) != 1 {
 			err := fmt.Errorf("Pod %s/%s must declare exactly one container; maclet does not support sidecars yet", pod.ObjectMeta.Namespace, pod.ObjectMeta.Name)
 			// Configuration errors are Pending, not terminal Failed: a ReplicaSet
@@ -147,10 +156,11 @@ func (m *workloadManager) reconcile(ctx context.Context, client *APIClient, pods
 			m.workloads[uid] = managed
 			journalChanged = true
 		}
-		if managed.Namespace != pod.ObjectMeta.Namespace || managed.Name != pod.ObjectMeta.Name || managed.PodContainerName != firstPodContainerName(*pod) {
+		if managed.Namespace != pod.ObjectMeta.Namespace || managed.Name != pod.ObjectMeta.Name || managed.PodContainerName != firstPodContainerName(*pod) || managed.HostNetwork != pod.Spec.HostNetwork {
 			managed.Namespace = pod.ObjectMeta.Namespace
 			managed.Name = pod.ObjectMeta.Name
 			managed.PodContainerName = firstPodContainerName(*pod)
+			managed.HostNetwork = pod.Spec.HostNetwork
 			journalChanged = true
 		}
 		if journalChanged {
@@ -161,7 +171,10 @@ func (m *workloadManager) reconcile(ctx context.Context, client *APIClient, pods
 			}
 		}
 		ip := pod.Status.PodIP
-		if ip == "" {
+		if pod.Spec.HostNetwork {
+			ip = m.nodeIP
+		}
+		if ip == "" && !pod.Spec.HostNetwork {
 			allocated, err := m.network.firstAvailableWorkloadIP(used)
 			if err != nil {
 				reconcileErrors = append(reconcileErrors, fmt.Errorf("allocate address for Pod %s/%s: %w", pod.ObjectMeta.Namespace, pod.ObjectMeta.Name, err))
@@ -171,12 +184,14 @@ func (m *workloadManager) reconcile(ctx context.Context, client *APIClient, pods
 			ip = allocated
 			used[ip] = true
 		}
-		if err := m.network.validateWorkloadAddress(ip); err != nil {
-			reconcileErrors = append(reconcileErrors, fmt.Errorf("Pod %s/%s has invalid PodIP %s: %w", pod.ObjectMeta.Namespace, pod.ObjectMeta.Name, ip, err))
-			_ = m.updateStatus(ctx, client, pod, "Pending", ip, "MacletInvalidPodIP", err.Error(), false, managed.RestartCount)
-			continue
+		if !pod.Spec.HostNetwork {
+			if err := m.network.validateWorkloadAddress(ip); err != nil {
+				reconcileErrors = append(reconcileErrors, fmt.Errorf("Pod %s/%s has invalid PodIP %s: %w", pod.ObjectMeta.Namespace, pod.ObjectMeta.Name, ip, err))
+				_ = m.updateStatus(ctx, client, pod, "Pending", ip, "MacletInvalidPodIP", err.Error(), false, managed.RestartCount)
+				continue
+			}
 		}
-		if managed.IP != "" && managed.IP != ip {
+		if managed.IP != "" && managed.IP != ip && !managed.HostNetwork {
 			if err := m.network.removeWorkloadIP(managed.IP); err != nil {
 				reconcileErrors = append(reconcileErrors, err)
 				continue
@@ -190,10 +205,12 @@ func (m *workloadManager) reconcile(ctx context.Context, client *APIClient, pods
 				continue
 			}
 		}
-		if err := m.network.addWorkloadIP(ip); err != nil {
-			reconcileErrors = append(reconcileErrors, fmt.Errorf("add address for Pod %s/%s: %w", pod.ObjectMeta.Namespace, pod.ObjectMeta.Name, err))
-			_ = m.updateStatus(ctx, client, pod, "Pending", ip, "MacletNetworkSetupFailed", err.Error(), false, managed.RestartCount)
-			continue
+		if !pod.Spec.HostNetwork {
+			if err := m.network.addWorkloadIP(ip); err != nil {
+				reconcileErrors = append(reconcileErrors, fmt.Errorf("add address for Pod %s/%s: %w", pod.ObjectMeta.Namespace, pod.ObjectMeta.Name, err))
+				_ = m.updateStatus(ctx, client, pod, "Pending", ip, "MacletNetworkSetupFailed", err.Error(), false, managed.RestartCount)
+				continue
+			}
 		}
 		if (pod.Status.Phase == "Succeeded" || pod.Status.Phase == "Failed") && podRestartPolicy(*pod) != "Always" {
 			continue

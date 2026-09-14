@@ -182,6 +182,31 @@ func TestWorkloadRunArgs(t *testing.T) {
 	}
 }
 
+func TestHostNetworkRunArgs(t *testing.T) {
+	manager := newWorkloadManager(nil, "/usr/local/bin/macker", "192.0.2.10")
+	pod := Pod{ObjectMeta: ObjectMeta{Namespace: "default", Name: "host", UID: "uid-host", Annotations: map[string]string{nativeDisablePortForwardAnnotation: "true"}}, Spec: PodSpec{HostNetwork: true, DNSPolicy: "ClusterFirstWithHostNet", Containers: []ContainerSpec{{Name: "web", Image: "example/native", Ports: []ContainerPort{{ContainerPort: 8080}}, Command: []string{"/app/server"}}}}}
+	managed := &managedWorkload{ContainerName: "maclet-default-host-uid-host", IP: "192.0.2.10", HostNetwork: true}
+	args, err := manager.runArgs(pod, pod.Spec.Containers[0], managed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(args, "\x00")
+	if !strings.Contains(joined, "run\x00--detach\x00--net=host") || strings.Contains(joined, "--net=external") || !strings.Contains(joined, "MACKER_PORT_1=8080") {
+		t.Fatalf("hostNetwork args = %#v", args)
+	}
+}
+
+func TestNativePodNetworkValidation(t *testing.T) {
+	badHost := Pod{ObjectMeta: ObjectMeta{Name: "host"}, Spec: PodSpec{HostNetwork: true, DNSPolicy: "ClusterFirst"}}
+	if err := validateNativePodNetwork(badHost); err == nil {
+		t.Fatal("hostNetwork accepted ClusterFirst DNS policy")
+	}
+	badPod := Pod{ObjectMeta: ObjectMeta{Name: "pod"}, Spec: PodSpec{DNSPolicy: "ClusterFirstWithHostNet"}}
+	if err := validateNativePodNetwork(badPod); err == nil {
+		t.Fatal("non-hostNetwork Pod accepted ClusterFirstWithHostNet")
+	}
+}
+
 func TestMackerVolumeArgs(t *testing.T) {
 	root := t.TempDir()
 	content := filepath.Join(root, "content")

@@ -4,7 +4,22 @@ import (
 	"errors"
 	"fmt"
 	"net"
+
+	corev1 "k8s.io/api/core/v1"
 )
+
+func validateNativePodNetwork(pod Pod) error {
+	if pod.Spec.HostNetwork {
+		if pod.Spec.DNSPolicy != corev1.DNSClusterFirstWithHostNet {
+			return fmt.Errorf("Pod %s/%s uses hostNetwork but DNS policy %q; maclet requires ClusterFirstWithHostNet", pod.ObjectMeta.Namespace, pod.ObjectMeta.Name, pod.Spec.DNSPolicy)
+		}
+		return nil
+	}
+	if pod.Spec.DNSPolicy == corev1.DNSClusterFirstWithHostNet {
+		return fmt.Errorf("Pod %s/%s requests ClusterFirstWithHostNet without hostNetwork", pod.ObjectMeta.Namespace, pod.ObjectMeta.Name)
+	}
+	return nil
+}
 
 func validateWorkloadAddress(cidr, ip string) error {
 	parsed := net.ParseIP(ip)

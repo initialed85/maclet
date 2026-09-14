@@ -264,7 +264,8 @@ Macker cannot enforce read-only mounts. Every reconciliation pass:
 
 1. lists Pods assigned to the registered Node;
 2. handles deletion and terminal lifecycle state;
-3. allocates or validates a PodCIDR address alias;
+3. allocates or validates a PodCIDR address alias for ordinary Pods; hostNetwork
+   Pods use Macker host networking and the node IP instead;
 4. resolves supported ConfigMap/Secret environment sources and downward-API
    field references through the authorized peer client, then validates
    supported volumes, environment, ports, and image configuration;
@@ -274,7 +275,8 @@ Macker cannot enforce read-only mounts. Every reconciliation pass:
    state rather than trusting the launcher alone;
 7. persists ownership before considering the workload healthy; and
 8. updates Pod phase, conditions, container state, PodIP, HostIP, restart count,
-   and exit metadata.
+   and exit metadata. HostNetwork Pods require `ClusterFirstWithHostNet` and
+   report the node IP as both PodIP and HostIP.
 
 The ownership journal allows startup reconciliation to remove orphaned Macker
 containers and IP aliases after a daemon crash. ConfigMap and Secret lookups

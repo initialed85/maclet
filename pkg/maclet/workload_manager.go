@@ -31,6 +31,7 @@ type managedWorkload struct {
 	IP               string
 	RestartCount     int32
 	VolumePaths      []string
+	HostNetwork      bool
 	RetryAfter       time.Time
 }
 
@@ -54,6 +55,7 @@ type workloadJournalRecord struct {
 	IP               string   `json:"ip,omitempty"`
 	RestartCount     int32    `json:"restartCount,omitempty"`
 	VolumePaths      []string `json:"volumePaths,omitempty"`
+	HostNetwork      bool     `json:"hostNetwork,omitempty"`
 }
 
 type workloadJournal struct {
@@ -129,6 +131,7 @@ func (m *workloadManager) loadJournalLocked() error {
 			IP:               record.IP,
 			RestartCount:     record.RestartCount,
 			VolumePaths:      append([]string(nil), record.VolumePaths...),
+			HostNetwork:      record.HostNetwork,
 		}
 	}
 	return nil
@@ -151,6 +154,7 @@ func (m *workloadManager) persistJournalLocked() error {
 			PodContainerName: workload.PodContainerName, ContainerName: workload.ContainerName,
 			IP: workload.IP, RestartCount: workload.RestartCount,
 			VolumePaths: append([]string(nil), workload.VolumePaths...),
+			HostNetwork: workload.HostNetwork,
 		})
 	}
 	sort.Slice(records, func(i, j int) bool { return records[i].UID < records[j].UID })
