@@ -17,27 +17,41 @@ func (m *workloadManager) mackerVolumeArgsWithContext(ctx context.Context, pod P
 	containerCopy.VolumeMounts = append([]VolumeMount(nil), container.VolumeMounts...)
 	materialized := make([]string, 0)
 	configMapVolumes := make(map[string]bool)
+	nfsVolumes := make(map[string]bool)
 	for index := range podCopy.Spec.Volumes {
 		volume := &podCopy.Spec.Volumes[index]
-		if volume.ConfigMap == nil {
-			continue
+		switch {
+		case volume.ConfigMap != nil:
+			path, err := m.materializeConfigMapVolume(ctx, pod, volume.Name, volume.ConfigMap)
+			if err != nil {
+				return nil, fmt.Errorf("volume %q: %w", volume.Name, err)
+			}
+			materialized = append(materialized, path)
+			configMapVolumes[volume.Name] = true
+			volume.HostPath = &HostPathVolumeSource{Path: path}
+			volume.ConfigMap = nil
+		case volume.PersistentVolumeClaim != nil:
+			path, err := m.mountGenericNFSVolume(ctx, pod, volume.Name, volume.PersistentVolumeClaim, managed)
+			if err != nil {
+				return nil, fmt.Errorf("volume %q: %w", volume.Name, err)
+			}
+			nfsVolumes[volume.Name] = true
+			volume.HostPath = &HostPathVolumeSource{Path: path}
+			volume.PersistentVolumeClaim = nil
 		}
-		path, err := m.materializeConfigMapVolume(ctx, pod, volume.Name, volume.ConfigMap)
-		if err != nil {
-			return nil, fmt.Errorf("volume %q: %w", volume.Name, err)
-		}
-		materialized = append(materialized, path)
-		configMapVolumes[volume.Name] = true
-		volume.HostPath = &HostPathVolumeSource{Path: path}
-		volume.ConfigMap = nil
 	}
 	for index := range containerCopy.VolumeMounts {
 		mount := &containerCopy.VolumeMounts[index]
-		if configMapVolumes[mount.Name] {
-			// ConfigMap data is materialized into a private trusted-native
-			// directory. Macker cannot enforce read-only symlink mounts, but
-			// writes remain local to this materialization and never update the
-			// Kubernetes ConfigMap.
+		if configMapVolumes[mount.Name] || nfsVolumes[mount.Name] {
+			// ConfigMap and NFS data are trusted host-backed volumes. Macker
+			// cannot enforce a read-only symlink mapping; NFS read-only state is
+			// enforced by the host mount itself.
+			if configMapVolumes[mount.Name] {
+				// ConfigMap data is materialized into a private trusted-native
+				// directory. Macker cannot enforce read-only symlink mounts, but
+				// writes remain local to this materialization and never update the
+				// Kubernetes ConfigMap.
+			}
 			mount.ReadOnly = false
 		}
 	}

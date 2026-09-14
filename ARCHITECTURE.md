@@ -259,8 +259,13 @@ Only Pods carrying the native workload label and assigned to the Mac are
 eligible. The initial runtime deliberately supports one container per Pod. HostPath
 volumes use Macker's trusted live symlink mappings; ConfigMap volumes are
 materialized under the state directory per Pod and volume name, then exposed
-through the same mapping. The materialized files are writable copies because
-Macker cannot enforce read-only mounts. Every reconciliation pass:
+through the same mapping. Generic `nfs.csi.k8s.io` PVCs resolve their Bound PV,
+mount the validated server/share beneath a journaled per-Pod path through the
+sudo-owned helper, and pass the mount (plus contained subPath) through the
+same mapping. NFS mounts are host-visible and Macker cannot enforce read-only
+semantics on the symlink mapping; lifecycle ownership is journaled so restart
+cleanup only unmounts paths maclet owns. The materialized files are writable
+copies because Macker cannot enforce read-only mounts. Every reconciliation pass:
 
 1. lists Pods assigned to the registered Node;
 2. handles deletion and terminal lifecycle state;

@@ -394,7 +394,14 @@ references through the authorized peer API client, and downward-API `fieldRef`
 supports Pod identity, node/IP, labels, and annotations. Missing required
 references and unsupported field sources remain Pending. The controller
 identity or an explicit peer kubeconfig must be authorized to read referenced
-ConfigMaps and Secrets. With a recent Macker, maclet records the actual exit code and
+ConfigMaps and Secrets. Generic NFS PVC wiring is now present behind the
+`nfs.csi.k8s.io` PV gate: maclet resolves the Bound PVC/PV, mounts the export
+under a journaled state path through sudo-owned `mount_nfs`, and passes the
+mounted path through Macker. This remains experimental until a real macOS NFS
+server read/write mount test succeeds. Mounts are host-visible, lifecycle is
+sudo-owned, and Macker cannot enforce read-only semantics on its symlink-backed
+mapping; ambiguous PV data, unsafe paths/options, and Longhorn RWO/block PVs
+remain Pending. With a recent Macker, maclet records the actual exit code and
 termination timestamps in the Kubernetes container status; older Macker
 binaries retain the previous status-only fallback. Supply `--macker-binary` to
 `join` when Macker is not on `PATH`; missing Darwin images are pulled lazily

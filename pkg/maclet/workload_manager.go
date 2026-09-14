@@ -1,6 +1,7 @@
 package maclet
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -24,6 +25,11 @@ const (
 	maxRetainedNativeLogBytes          = 1 << 20
 )
 
+type nfsMountRecord struct {
+	Target string       `json:"target"`
+	Spec   nfsMountSpec `json:"spec"`
+}
+
 type managedWorkload struct {
 	UID              string
 	Namespace        string
@@ -37,6 +43,7 @@ type managedWorkload struct {
 	Retained         bool
 	LogFile          string
 	LogExpiresAt     time.Time
+	NFSMounts        []nfsMountRecord
 	RetryAfter       time.Time
 }
 
@@ -52,18 +59,19 @@ type mackerInspection struct {
 }
 
 type workloadJournalRecord struct {
-	UID              string   `json:"uid"`
-	Namespace        string   `json:"namespace,omitempty"`
-	Name             string   `json:"name,omitempty"`
-	ContainerName    string   `json:"containerName"`
-	PodContainerName string   `json:"podContainerName,omitempty"`
-	IP               string   `json:"ip,omitempty"`
-	RestartCount     int32    `json:"restartCount,omitempty"`
-	VolumePaths      []string `json:"volumePaths,omitempty"`
-	HostNetwork      bool     `json:"hostNetwork,omitempty"`
-	Retained         bool     `json:"retained,omitempty"`
-	LogFile          string   `json:"logFile,omitempty"`
-	LogExpiresAt     string   `json:"logExpiresAt,omitempty"`
+	UID              string           `json:"uid"`
+	Namespace        string           `json:"namespace,omitempty"`
+	Name             string           `json:"name,omitempty"`
+	ContainerName    string           `json:"containerName"`
+	PodContainerName string           `json:"podContainerName,omitempty"`
+	IP               string           `json:"ip,omitempty"`
+	RestartCount     int32            `json:"restartCount,omitempty"`
+	VolumePaths      []string         `json:"volumePaths,omitempty"`
+	HostNetwork      bool             `json:"hostNetwork,omitempty"`
+	Retained         bool             `json:"retained,omitempty"`
+	LogFile          string           `json:"logFile,omitempty"`
+	LogExpiresAt     string           `json:"logExpiresAt,omitempty"`
+	NFSMounts        []nfsMountRecord `json:"nfsMounts,omitempty"`
 }
 
 type workloadJournal struct {
@@ -81,7 +89,12 @@ type workloadManager struct {
 	workloads    map[string]*managedWorkload
 	retained     map[string]*managedWorkload
 	logsRoot     string
+	nfsRoot      string
 	logTTL       time.Duration
+	useSudo      bool
+	mountNFS     func(context.Context, bool, nfsMountSpec, string) error
+	unmountNFS   func(bool, string) error
+	isMountpoint func(string, nfsMountSpec) (bool, error)
 	debug        bool
 	mu           sync.RWMutex
 }
@@ -104,6 +117,7 @@ func newWorkloadManagerWithState(network *DarwinNetworkHandle, mackerBinary, nod
 		retained:     make(map[string]*managedWorkload),
 		volumeRoot:   filepath.Join(stateDir, "volumes"),
 		logsRoot:     filepath.Join(stateDir, "logs"),
+		nfsRoot:      filepath.Join(stateDir, "nfs"),
 		logTTL:       defaultNativeLogRetention,
 	}
 }
@@ -148,6 +162,7 @@ func (m *workloadManager) loadJournalLocked() error {
 			HostNetwork:      record.HostNetwork,
 			Retained:         record.Retained,
 			LogFile:          record.LogFile,
+			NFSMounts:        append([]nfsMountRecord(nil), record.NFSMounts...),
 		}
 		if record.LogExpiresAt != "" {
 			if parsed, parseErr := time.Parse(time.RFC3339Nano, record.LogExpiresAt); parseErr == nil {
@@ -184,7 +199,8 @@ func (m *workloadManager) persistJournalLocked() error {
 			IP: workload.IP, RestartCount: workload.RestartCount,
 			VolumePaths: append([]string(nil), workload.VolumePaths...),
 			HostNetwork: workload.HostNetwork, Retained: workload.Retained,
-			LogFile: workload.LogFile,
+			LogFile:   workload.LogFile,
+			NFSMounts: append([]nfsMountRecord(nil), workload.NFSMounts...),
 		}
 		if !workload.LogExpiresAt.IsZero() {
 			record.LogExpiresAt = workload.LogExpiresAt.UTC().Format(time.RFC3339Nano)

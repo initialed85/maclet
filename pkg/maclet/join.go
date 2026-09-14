@@ -135,6 +135,7 @@ func runJoinSession(ctx context.Context, cfg JoinConfig) error {
 		if cfg.NativeLogTTL > 0 {
 			workloads.logTTL = cfg.NativeLogTTL
 		}
+		workloads.useSudo = cfg.useSudo
 		workloads.apiClient = peerClient
 		if workloads.apiClient == nil {
 			if workloadClient, peerErr := peerAPIClient(cfg, state); peerErr != nil {

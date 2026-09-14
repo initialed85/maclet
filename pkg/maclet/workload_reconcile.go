@@ -51,6 +51,17 @@ func (m *workloadManager) removeWorkload(workload *managedWorkload) error {
 			cleanupErrors = append(cleanupErrors, err)
 		}
 	}
+	for _, mount := range workload.NFSMounts {
+		unmount := m.unmountNFS
+		if unmount == nil {
+			unmount = func(useSudo bool, target string) error { return runNFSUnmount(context.Background(), useSudo, target) }
+		}
+		if err := unmount(m.useSudo, mount.Target); err != nil && !isNFSUnmountMissing(err) {
+			cleanupErrors = append(cleanupErrors, fmt.Errorf("unmount NFS %s: %w", mount.Target, err))
+		}
+		_ = os.RemoveAll(mount.Target)
+	}
+	workload.NFSMounts = nil
 	for _, volumePath := range workload.VolumePaths {
 		if err := os.RemoveAll(volumePath); err != nil && !errors.Is(err, os.ErrNotExist) {
 			cleanupErrors = append(cleanupErrors, fmt.Errorf("remove materialized volume %s: %w", volumePath, err))
@@ -328,6 +339,14 @@ func (m *workloadManager) reconcile(ctx context.Context, client *APIClient, pods
 			// Pod as dead and create another copy on every reconciliation.
 			_ = m.updateStatus(ctx, client, pod, "Pending", ip, "MacletMackerLaunchFailed", err.Error(), false, managed.RestartCount)
 			continue
+		}
+		if len(managed.NFSMounts) > 0 {
+			if err := m.persistJournalLocked(); err != nil {
+				reconcileErrors = append(reconcileErrors, fmt.Errorf("persist NFS mount ownership for %s/%s: %w", pod.ObjectMeta.Namespace, pod.ObjectMeta.Name, err))
+				managed.RetryAfter = time.Now().Add(workloadRetryDelay)
+				_ = m.updateStatus(ctx, client, pod, "Pending", ip, "MacletOwnershipPersistFailed", err.Error(), false, managed.RestartCount)
+				continue
+			}
 		}
 		if m.debug {
 			log.Printf("debug: Macker invocation for %s/%s: %s", pod.ObjectMeta.Namespace, pod.ObjectMeta.Name, redactMackerArgs(args))

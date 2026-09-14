@@ -49,6 +49,7 @@ func (m *workloadManager) retainWorkloadLocked(workload *managedWorkload) {
 	workload.Retained = true
 	workload.IP = ""
 	workload.VolumePaths = nil
+	workload.NFSMounts = nil
 	if workload.LogExpiresAt.IsZero() {
 		retention := m.logTTL
 		if retention <= 0 {

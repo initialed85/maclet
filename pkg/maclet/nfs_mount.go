@@ -12,10 +12,10 @@ import (
 )
 
 type nfsMountSpec struct {
-	Server       string
-	Share        string
-	MountOptions []string
-	ReadOnly     bool
+	Server       string   `json:"server"`
+	Share        string   `json:"share"`
+	MountOptions []string `json:"mountOptions,omitempty"`
+	ReadOnly     bool     `json:"readOnly,omitempty"`
 }
 
 func nfsMountCommandArgs(spec nfsMountSpec, target string) ([]string, error) {
