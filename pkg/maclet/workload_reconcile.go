@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 )
@@ -47,6 +48,12 @@ func (m *workloadManager) removeWorkload(workload *managedWorkload) error {
 			cleanupErrors = append(cleanupErrors, err)
 		}
 	}
+	for _, volumePath := range workload.VolumePaths {
+		if err := os.RemoveAll(volumePath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			cleanupErrors = append(cleanupErrors, fmt.Errorf("remove materialized volume %s: %w", volumePath, err))
+		}
+	}
+	workload.VolumePaths = nil
 	return errors.Join(cleanupErrors...)
 }
 
@@ -202,6 +209,9 @@ func (m *workloadManager) reconcile(ctx context.Context, client *APIClient, pods
 			continue
 		}
 		if found && status == "running" {
+			if err := m.refreshConfigMapVolumes(ctx, *pod, managed); err != nil {
+				log.Printf("warning: refresh ConfigMap volumes for %s/%s: %v", pod.ObjectMeta.Namespace, pod.ObjectMeta.Name, err)
+			}
 			managed.RetryAfter = time.Time{}
 			if err := m.updateStatus(ctx, client, pod, "Running", ip, "MacletWorkloadRunning", "Macker is running the trusted native workload", true, managed.RestartCount); err != nil {
 				reconcileErrors = append(reconcileErrors, err)

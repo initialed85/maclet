@@ -376,21 +376,25 @@ slice supports writable `hostPath` volumes through Macker's live symlink-backed
 `FileOrCreate` hostPath types are supported, as is a contained `subPath`. For
 file content, use a `Directory` hostPath plus `subPath` and mount the file at
 its full destination (for example, `/usr/share/nginx/html/index.html`), or use
-a `File` hostPath without `subPath`. Macker cannot enforce read-only mounts, so `readOnly` and `subPathExpr` mounts
-are rejected. Multiple containers, non-hostPath volume sources, unsupported
-`valueFrom` sources, and `hostPort` mappings are also rejected. An absolute
-`workingDir` is passed to Macker and overrides the image working directory.
-`envFrom` supports ConfigMap and Secret references through the authorized peer
-API client, and downward-API `fieldRef` supports Pod identity, node/IP,
-labels, and annotations. Missing required references and unsupported field
-sources remain Pending. With a recent Macker, maclet records the actual exit code and
+a `File` hostPath without `subPath`. ConfigMap volumes are materialized into
+per-Pod state directories and support `items`, `defaultMode`, `binaryData`, and
+optional missing ConfigMaps. Macker cannot enforce read-only mounts, so
+hostPath `readOnly` and `subPathExpr` mounts are rejected; ConfigMap read-only
+mounts are accepted but remain trusted writable copies. Multiple containers,
+unsupported volume sources, unsupported `valueFrom` sources, and `hostPort`
+mappings are also rejected. An absolute `workingDir` is passed to Macker and
+overrides the image working directory. `envFrom` supports ConfigMap and Secret
+references through the authorized peer API client, and downward-API `fieldRef`
+supports Pod identity, node/IP, labels, and annotations. Missing required
+references and unsupported field sources remain Pending. The controller
+identity or an explicit peer kubeconfig must be authorized to read referenced
+ConfigMaps and Secrets. With a recent Macker, maclet records the actual exit code and
 termination timestamps in the Kubernetes container status; older Macker
 binaries retain the previous status-only fallback. Supply `--macker-binary` to
 `join` when Macker is not on `PATH`; missing Darwin images are pulled lazily
 through Macker's normal registry credential handling. Add `--debug` to log each
-quoted Macker invocation and,
-when a native process exits during startup, its captured Macker logs. Debug
-output can include Pod environment values, so use it only in a suitable log.
+quoted Macker invocation and, when a native process exits during startup, its
+captured Macker logs. Environment values are redacted in debug invocations.
 
 When VXLAN and Macker are enabled, maclet also serves the kubelet HTTPS
 endpoint on the Node IP and port 10250 using the K3s-issued serving and client

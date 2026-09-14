@@ -30,6 +30,7 @@ type managedWorkload struct {
 	ContainerName    string
 	IP               string
 	RestartCount     int32
+	VolumePaths      []string
 	RetryAfter       time.Time
 }
 
@@ -45,13 +46,14 @@ type mackerInspection struct {
 }
 
 type workloadJournalRecord struct {
-	UID              string `json:"uid"`
-	Namespace        string `json:"namespace,omitempty"`
-	Name             string `json:"name,omitempty"`
-	ContainerName    string `json:"containerName"`
-	PodContainerName string `json:"podContainerName,omitempty"`
-	IP               string `json:"ip,omitempty"`
-	RestartCount     int32  `json:"restartCount,omitempty"`
+	UID              string   `json:"uid"`
+	Namespace        string   `json:"namespace,omitempty"`
+	Name             string   `json:"name,omitempty"`
+	ContainerName    string   `json:"containerName"`
+	PodContainerName string   `json:"podContainerName,omitempty"`
+	IP               string   `json:"ip,omitempty"`
+	RestartCount     int32    `json:"restartCount,omitempty"`
+	VolumePaths      []string `json:"volumePaths,omitempty"`
 }
 
 type workloadJournal struct {
@@ -65,6 +67,7 @@ type workloadManager struct {
 	nodeIP       string
 	apiClient    *APIClient
 	journalPath  string
+	volumeRoot   string
 	workloads    map[string]*managedWorkload
 	debug        bool
 	mu           sync.RWMutex
@@ -85,6 +88,7 @@ func newWorkloadManagerWithState(network *DarwinNetworkHandle, mackerBinary, nod
 		nodeIP:       nodeIP,
 		journalPath:  journalPath,
 		workloads:    make(map[string]*managedWorkload),
+		volumeRoot:   filepath.Join(stateDir, "volumes"),
 	}
 }
 
@@ -124,6 +128,7 @@ func (m *workloadManager) loadJournalLocked() error {
 			ContainerName:    record.ContainerName,
 			IP:               record.IP,
 			RestartCount:     record.RestartCount,
+			VolumePaths:      append([]string(nil), record.VolumePaths...),
 		}
 	}
 	return nil
@@ -145,6 +150,7 @@ func (m *workloadManager) persistJournalLocked() error {
 			UID: workload.UID, Namespace: workload.Namespace, Name: workload.Name,
 			PodContainerName: workload.PodContainerName, ContainerName: workload.ContainerName,
 			IP: workload.IP, RestartCount: workload.RestartCount,
+			VolumePaths: append([]string(nil), workload.VolumePaths...),
 		})
 	}
 	sort.Slice(records, func(i, j int) bool { return records[i].UID < records[j].UID })

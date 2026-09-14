@@ -256,8 +256,11 @@ resolution.
 ## Workload reconciliation
 
 Only Pods carrying the native workload label and assigned to the Mac are
-eligible. The initial runtime deliberately supports one container per Pod.
-Every reconciliation pass:
+eligible. The initial runtime deliberately supports one container per Pod. HostPath
+volumes use Macker's trusted live symlink mappings; ConfigMap volumes are
+materialized under the state directory per Pod and volume name, then exposed
+through the same mapping. The materialized files are writable copies because
+Macker cannot enforce read-only mounts. Every reconciliation pass:
 
 1. lists Pods assigned to the registered Node;
 2. handles deletion and terminal lifecycle state;

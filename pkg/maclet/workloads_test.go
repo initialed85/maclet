@@ -26,6 +26,7 @@ func TestWorkloadJournalRoundTrip(t *testing.T) {
 	manager.workloads["uid-1"] = &managedWorkload{
 		UID: "uid-1", Namespace: "default", Name: "web",
 		ContainerName: "maclet-default-web-uid-1", IP: "10.42.8.3", RestartCount: 2,
+		VolumePaths: []string{filepath.Join(stateDir, "volumes", "web", "settings")},
 	}
 	if err := manager.persistJournal(); err != nil {
 		t.Fatal(err)
@@ -35,7 +36,7 @@ func TestWorkloadJournalRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	workload := loaded.workloads["uid-1"]
-	if workload == nil || workload.Namespace != "default" || workload.Name != "web" || workload.ContainerName != "maclet-default-web-uid-1" || workload.IP != "10.42.8.3" || workload.RestartCount != 2 {
+	if workload == nil || workload.Namespace != "default" || workload.Name != "web" || workload.ContainerName != "maclet-default-web-uid-1" || workload.IP != "10.42.8.3" || workload.RestartCount != 2 || len(workload.VolumePaths) != 1 {
 		t.Fatalf("loaded workload = %#v", workload)
 	}
 	body, err := os.ReadFile(filepath.Join(stateDir, "workloads.json"))

@@ -222,7 +222,7 @@ func (m *workloadManager) runArgsWithContext(ctx context.Context, pod Pod, conta
 		}
 		workingDir = filepath.Clean(container.WorkingDir)
 	}
-	volumeArgs, err := mackerVolumeArgs(pod, container)
+	volumeArgs, err := m.mackerVolumeArgsWithContext(ctx, pod, container, managed)
 	if err != nil {
 		return nil, fmt.Errorf("container %q: %w", container.Name, err)
 	}
