@@ -47,6 +47,7 @@ type JoinConfig struct {
 	PeerKubeconfig        string
 	PeerContext           string
 	DrainTimeout          time.Duration
+	NativeLogTTL          time.Duration
 	VXLANPort             int
 	VXLANMTU              int
 	ClusterCIDR           string

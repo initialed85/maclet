@@ -40,6 +40,9 @@ func (m *workloadManager) removeWorkload(workload *managedWorkload) error {
 		return nil
 	}
 	var cleanupErrors []error
+	if err := m.archiveWorkloadLogs(workload); err != nil {
+		log.Printf("warning: archive logs for %s: %v", workload.ContainerName, err)
+	}
 	if err := m.stopContainer(workload); err != nil {
 		cleanupErrors = append(cleanupErrors, err)
 	}
@@ -73,6 +76,11 @@ func listAssignedPods(ctx context.Context, client *APIClient, nodeName string) (
 func (m *workloadManager) reconcile(ctx context.Context, client *APIClient, pods []Pod) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.pruneRetainedLogsLocked(time.Now()) {
+		if err := m.persistJournalLocked(); err != nil {
+			return err
+		}
+	}
 	used := make(map[string]bool)
 	for _, pod := range pods {
 		if pod.Status.PodIP != "" {
@@ -106,7 +114,7 @@ func (m *workloadManager) reconcile(ctx context.Context, client *APIClient, pods
 				m.workloads[uid] = workload
 				continue
 			}
-			delete(m.workloads, uid)
+			m.retainWorkloadLocked(workload)
 			if err := m.persistJournalLocked(); err != nil {
 				reconcileErrors = append(reconcileErrors, fmt.Errorf("persist deleted Pod %s/%s cleanup: %w", pod.ObjectMeta.Namespace, pod.ObjectMeta.Name, err))
 			}
@@ -280,12 +288,22 @@ func (m *workloadManager) reconcile(ctx context.Context, client *APIClient, pods
 						message = "Macker workload exited; exit code is not available through the current Macker CLI"
 					}
 				}
+				if err := m.archiveWorkloadLogs(managed); err != nil {
+					log.Printf("warning: archive logs for %s/%s: %v", pod.ObjectMeta.Namespace, pod.ObjectMeta.Name, err)
+				}
 				_ = m.stopContainer(managed)
+				m.retainWorkloadLocked(managed)
+				if err := m.persistJournalLocked(); err != nil {
+					reconcileErrors = append(reconcileErrors, err)
+				}
 				if err := m.updateStatus(ctx, client, pod, phase, ip, reason, message, false, managed.RestartCount, inspection); err != nil {
 					reconcileErrors = append(reconcileErrors, err)
 				}
 				continue
 			default:
+				if err := m.archiveWorkloadLogs(managed); err != nil {
+					log.Printf("warning: archive restart logs for %s/%s: %v", pod.ObjectMeta.Namespace, pod.ObjectMeta.Name, err)
+				}
 				if err := m.stopContainer(managed); err != nil {
 					reconcileErrors = append(reconcileErrors, err)
 					managed.RetryAfter = time.Now().Add(workloadRetryDelay)
@@ -354,7 +372,7 @@ func (m *workloadManager) reconcile(ctx context.Context, client *APIClient, pods
 			reconcileErrors = append(reconcileErrors, fmt.Errorf("remove stale maclet workload %s: %w", workload.ContainerName, err))
 			continue
 		}
-		delete(m.workloads, uid)
+		m.retainWorkloadLocked(workload)
 		journalChanged = true
 	}
 	if journalChanged {

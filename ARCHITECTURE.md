@@ -279,7 +279,12 @@ Macker cannot enforce read-only mounts. Every reconciliation pass:
    report the node IP as both PodIP and HostIP.
 
 The ownership journal allows startup reconciliation to remove orphaned Macker
-containers and IP aliases after a daemon crash. ConfigMap and Secret lookups
+containers and IP aliases after a daemon crash. Before stopping/removing a
+Macker container, maclet archives up to 1 MiB of its logs into a state-owned
+retention file. Retained records remain addressable by namespace, Pod UID, and
+container across restart and are served by the kubelet logs handler after
+Macker cleanup; a configurable 24-hour TTL prunes records and files.
+ConfigMap and Secret lookups
 use the controller or explicitly configured peer API identity; the restricted
 system:node identity is not broadened. A separate cleanup controller can
 force-delete old terminating native Pod objects using a narrowly scoped cluster

@@ -401,6 +401,12 @@ binaries retain the previous status-only fallback. Supply `--macker-binary` to
 through Macker's normal registry credential handling. Add `--debug` to log each
 quoted Macker invocation and, when a native process exits during startup, its
 captured Macker logs. Environment values are redacted in debug invocations.
+Before Macker cleanup, maclet archives up to 1 MiB of output per terminated
+workload under the state directory. Retained records are keyed by namespace,
+Pod UID, and container, survive daemon restart, and are served by `kubectl logs`
+through the kubelet/API-server proxy after the Macker container is removed.
+Use `--native-log-ttl` to change the default 24-hour retention period; expired
+records and files are pruned during startup and reconciliation.
 
 When VXLAN and Macker are enabled, maclet also serves the kubelet HTTPS
 endpoint on the Node IP and port 10250 using the K3s-issued serving and client

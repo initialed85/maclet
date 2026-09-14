@@ -20,6 +20,8 @@ const (
 	nativeWorkloadLabelValue           = "true"
 	nativeDisablePortForwardAnnotation = "k8s-darwin.dev/disable-port-forward"
 	workloadRetryDelay                 = 10 * time.Second
+	defaultNativeLogRetention          = 24 * time.Hour
+	maxRetainedNativeLogBytes          = 1 << 20
 )
 
 type managedWorkload struct {
@@ -32,6 +34,9 @@ type managedWorkload struct {
 	RestartCount     int32
 	VolumePaths      []string
 	HostNetwork      bool
+	Retained         bool
+	LogFile          string
+	LogExpiresAt     time.Time
 	RetryAfter       time.Time
 }
 
@@ -56,6 +61,9 @@ type workloadJournalRecord struct {
 	RestartCount     int32    `json:"restartCount,omitempty"`
 	VolumePaths      []string `json:"volumePaths,omitempty"`
 	HostNetwork      bool     `json:"hostNetwork,omitempty"`
+	Retained         bool     `json:"retained,omitempty"`
+	LogFile          string   `json:"logFile,omitempty"`
+	LogExpiresAt     string   `json:"logExpiresAt,omitempty"`
 }
 
 type workloadJournal struct {
@@ -71,6 +79,9 @@ type workloadManager struct {
 	journalPath  string
 	volumeRoot   string
 	workloads    map[string]*managedWorkload
+	retained     map[string]*managedWorkload
+	logsRoot     string
+	logTTL       time.Duration
 	debug        bool
 	mu           sync.RWMutex
 }
@@ -90,7 +101,10 @@ func newWorkloadManagerWithState(network *DarwinNetworkHandle, mackerBinary, nod
 		nodeIP:       nodeIP,
 		journalPath:  journalPath,
 		workloads:    make(map[string]*managedWorkload),
+		retained:     make(map[string]*managedWorkload),
 		volumeRoot:   filepath.Join(stateDir, "volumes"),
+		logsRoot:     filepath.Join(stateDir, "logs"),
+		logTTL:       defaultNativeLogRetention,
 	}
 }
 
@@ -122,7 +136,7 @@ func (m *workloadManager) loadJournalLocked() error {
 		if record.UID == "" || record.ContainerName == "" {
 			return errors.New("workload journal contains an incomplete record")
 		}
-		m.workloads[record.UID] = &managedWorkload{
+		workload := &managedWorkload{
 			UID:              record.UID,
 			Namespace:        record.Namespace,
 			Name:             record.Name,
@@ -132,7 +146,22 @@ func (m *workloadManager) loadJournalLocked() error {
 			RestartCount:     record.RestartCount,
 			VolumePaths:      append([]string(nil), record.VolumePaths...),
 			HostNetwork:      record.HostNetwork,
+			Retained:         record.Retained,
+			LogFile:          record.LogFile,
 		}
+		if record.LogExpiresAt != "" {
+			if parsed, parseErr := time.Parse(time.RFC3339Nano, record.LogExpiresAt); parseErr == nil {
+				workload.LogExpiresAt = parsed
+			}
+		}
+		if workload.Retained {
+			m.retained[record.UID] = workload
+		} else {
+			m.workloads[record.UID] = workload
+		}
+	}
+	if m.pruneRetainedLogsLocked(time.Now()) {
+		return m.persistJournalLocked()
 	}
 	return nil
 }
@@ -147,15 +176,26 @@ func (m *workloadManager) persistJournalLocked() error {
 	if m.journalPath == "" {
 		return nil
 	}
-	records := make([]workloadJournalRecord, 0, len(m.workloads))
-	for _, workload := range m.workloads {
-		records = append(records, workloadJournalRecord{
+	records := make([]workloadJournalRecord, 0, len(m.workloads)+len(m.retained))
+	appendRecord := func(workload *managedWorkload) {
+		record := workloadJournalRecord{
 			UID: workload.UID, Namespace: workload.Namespace, Name: workload.Name,
 			PodContainerName: workload.PodContainerName, ContainerName: workload.ContainerName,
 			IP: workload.IP, RestartCount: workload.RestartCount,
 			VolumePaths: append([]string(nil), workload.VolumePaths...),
-			HostNetwork: workload.HostNetwork,
-		})
+			HostNetwork: workload.HostNetwork, Retained: workload.Retained,
+			LogFile: workload.LogFile,
+		}
+		if !workload.LogExpiresAt.IsZero() {
+			record.LogExpiresAt = workload.LogExpiresAt.UTC().Format(time.RFC3339Nano)
+		}
+		records = append(records, record)
+	}
+	for _, workload := range m.workloads {
+		appendRecord(workload)
+	}
+	for _, workload := range m.retained {
+		appendRecord(workload)
 	}
 	sort.Slice(records, func(i, j int) bool { return records[i].UID < records[j].UID })
 	body, err := json.MarshalIndent(workloadJournal{Version: 1, Workloads: records}, "", "  ")
@@ -306,6 +346,16 @@ func (m *workloadManager) findContainer(namespace, podName, containerName string
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	for _, workload := range m.workloads {
+		if workload.Namespace != namespace || workload.Name != podName {
+			continue
+		}
+		if workload.PodContainerName != "" && workload.PodContainerName != containerName {
+			return nil, fmt.Errorf("container %q is not managed by maclet", containerName)
+		}
+		copy := *workload
+		return &copy, nil
+	}
+	for _, workload := range m.retained {
 		if workload.Namespace != namespace || workload.Name != podName {
 			continue
 		}

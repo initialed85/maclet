@@ -132,6 +132,9 @@ func runJoinSession(ctx context.Context, cfg JoinConfig) error {
 		}
 		log.Printf("published Flannel VXLAN metadata for %s: publicIP=%s vtepMAC=%s gatewayMAC=%s", state.NodeName, vxlanPublicIP(cfg, state), vxlan.BridgeMAC, gatewayMAC)
 		workloads = newWorkloadManagerWithState(darwinNetwork, cfg.MackerBinary, state.NodeIP, cfg.StateDir)
+		if cfg.NativeLogTTL > 0 {
+			workloads.logTTL = cfg.NativeLogTTL
+		}
 		workloads.apiClient = peerClient
 		if workloads.apiClient == nil {
 			if workloadClient, peerErr := peerAPIClient(cfg, state); peerErr != nil {

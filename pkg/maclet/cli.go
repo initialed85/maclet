@@ -78,6 +78,7 @@ func runJoinCommand(args []string) error {
 	flags.StringVar(&cfg.ClusterCIDR, "cluster-cidr", defaultClusterCIDR, "cluster Pod network CIDR routed through the Darwin VXLAN")
 	flags.StringVar(&cfg.ServiceCIDR, "service-cidr", defaultServiceCIDR, "Kubernetes Service network CIDR routed through the Darwin VXLAN")
 	flags.DurationVar(&cfg.DrainTimeout, "drain-timeout", defaultDrainTimeout, "maximum time for API cordon during graceful shutdown")
+	flags.DurationVar(&cfg.NativeLogTTL, "native-log-ttl", defaultNativeLogRetention, "retention period for exited native workload logs")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}

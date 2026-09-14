@@ -85,6 +85,28 @@ esac
 	}
 }
 
+func TestKubeletLogsServesRetainedExitedWorkloadAfterMackerCleanup(t *testing.T) {
+	stateDir := t.TempDir()
+	manager := newWorkloadManagerWithState(nil, "/does/not/exist", "192.168.137.111", stateDir)
+	manager.retained["uid-1"] = &managedWorkload{
+		UID: "uid-1", Namespace: "default", Name: "nginx-pod", PodContainerName: "nginx",
+		ContainerName: "macker-default-nginx", Retained: true, LogFile: "retained.log",
+	}
+	if err := os.MkdirAll(manager.logsRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(manager.logsRoot, "retained.log"), []byte("exited output\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	handler := &kubeletHandler{manager: manager}
+	request := httptest.NewRequest(http.MethodGet, "/containerLogs/default/nginx-pod/nginx", nil)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || response.Body.String() != "exited output\n" {
+		t.Fatalf("response = %d %q", response.Code, response.Body.String())
+	}
+}
+
 func TestKubeletLogsRejectsUnmanagedContainer(t *testing.T) {
 	manager := newWorkloadManager(nil, "/does/not/exist", "192.168.137.111")
 	manager.workloads["uid-1"] = &managedWorkload{

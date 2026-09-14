@@ -76,7 +76,7 @@ func (m *workloadManager) cleanup() error {
 			cleanupErrors = append(cleanupErrors, fmt.Errorf("cleanup workload %s: %w", uid, err))
 			continue
 		}
-		delete(m.workloads, uid)
+		m.retainWorkloadLocked(workload)
 		journalChanged = true
 	}
 	if journalChanged || len(m.workloads) == 0 {

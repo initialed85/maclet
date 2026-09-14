@@ -86,13 +86,36 @@ func (h *kubeletHandler) serveLogs(response http.ResponseWriter, request *http.R
 	if !ok {
 		return
 	}
-	if status, found, err := h.manager.containerStatus(workload.ContainerName); err != nil {
+	serveRetained := func() bool {
+		body, readErr := h.manager.readRetainedLogs(workload)
+		if readErr != nil {
+			return false
+		}
+		if request.URL.Query().Get("follow") == "true" {
+			http.Error(response, "cannot follow logs for an exited workload", http.StatusBadRequest)
+			return true
+		}
+		response.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		response.WriteHeader(http.StatusOK)
+		_, _ = response.Write(body)
+		return true
+	}
+	if workload.Retained && serveRetained() {
+		return
+	}
+	status, found, err := h.manager.containerStatus(workload.ContainerName)
+	if err != nil {
 		http.Error(response, fmt.Sprintf("inspect container: %v", err), http.StatusInternalServerError)
 		return
-	} else if !found {
+	}
+	if !found {
+		if serveRetained() {
+			return
+		}
 		http.Error(response, "container is not present", http.StatusNotFound)
 		return
-	} else if status == "" {
+	}
+	if status == "" {
 		http.Error(response, "container has no status", http.StatusNotFound)
 		return
 	}
