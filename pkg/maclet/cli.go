@@ -128,6 +128,10 @@ func Main(args []string) int {
 		err = cleanupControllerCommand(args[1:])
 	case "resolver-helper":
 		err = resolverHelperCommand(args[1:])
+	case "nfs-mount":
+		err = nfsMountHelperCommand(args[1:])
+	case "nfs-unmount":
+		err = nfsUnmountHelperCommand(args[1:])
 	case "version":
 		fmt.Println(version)
 	case "help", "--help", "-h":
