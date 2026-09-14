@@ -210,8 +210,12 @@ func (m *workloadManager) runArgs(pod Pod, container ContainerSpec, managed *man
 	if container.Image == "" {
 		return nil, errors.New("container image is empty")
 	}
+	workingDir := ""
 	if container.WorkingDir != "" {
-		return nil, fmt.Errorf("container %q sets workingDir %q, which Macker does not support yet", container.Name, container.WorkingDir)
+		if !filepath.IsAbs(container.WorkingDir) {
+			return nil, fmt.Errorf("container %q workingDir %q must be an absolute path", container.Name, container.WorkingDir)
+		}
+		workingDir = filepath.Clean(container.WorkingDir)
 	}
 	volumeArgs, err := mackerVolumeArgs(pod, container)
 	if err != nil {
@@ -243,6 +247,9 @@ func (m *workloadManager) runArgs(pod Pod, container ContainerSpec, managed *man
 		"--name", managed.ContainerName,
 	}
 	args = append(args, volumeArgs...)
+	if workingDir != "" {
+		args = append(args, "--workdir", workingDir)
+	}
 	// Native workloads use per-Pod PF remapping by default. Opt out only for
 	// images that cannot consume the MACKER_PORT_N value (for example, an
 	// application with a hard-coded listener port).

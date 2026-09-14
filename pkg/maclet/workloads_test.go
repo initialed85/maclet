@@ -133,7 +133,7 @@ func TestWorkloadRunArgs(t *testing.T) {
 			Annotations: map[string]string{nativeDisablePortForwardAnnotation: "true"},
 		},
 		Spec: PodSpec{Containers: []ContainerSpec{{
-			Name: "web", Image: "initialed85/nginx-darwin:latest",
+			Name: "web", Image: "initialed85/nginx-darwin:latest", WorkingDir: "/app/../work",
 			Command: []string{"/bin/nginx"}, Args: []string{"-g", "daemon off;"},
 			Ports: []ContainerPort{{ContainerPort: 8080, Protocol: "TCP"}},
 		}}},
@@ -143,7 +143,7 @@ func TestWorkloadRunArgs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"run", "--detach", "--net=external", "--interface", "bridge101", "--ip", "10.42.8.3", "--host-interface", "bridge101", "--host-ip", "10.42.8.1", "--name", "maclet-default-web-uid-1", "--env", "MACKER_PORT_1=8080", "--entrypoint", "/bin/nginx", "initialed85/nginx-darwin:latest", "--", "-g", "daemon off;"}
+	want := []string{"run", "--detach", "--net=external", "--interface", "bridge101", "--ip", "10.42.8.3", "--host-interface", "bridge101", "--host-ip", "10.42.8.1", "--name", "maclet-default-web-uid-1", "--workdir", "/work", "--env", "MACKER_PORT_1=8080", "--entrypoint", "/bin/nginx", "initialed85/nginx-darwin:latest", "--", "-g", "daemon off;"}
 	if len(args) != len(want) {
 		t.Fatalf("run args length = %d, want %d: %#v", len(args), len(want), args)
 	}
@@ -157,6 +157,11 @@ func TestWorkloadRunArgs(t *testing.T) {
 		t.Fatal("runArgs accepted unsupported hostPort")
 	}
 	pod.Spec.Containers[0].Ports[0].HostPort = 0
+	pod.Spec.Containers[0].WorkingDir = "relative/workdir"
+	if _, err := manager.runArgs(pod, pod.Spec.Containers[0], managed); err == nil || !strings.Contains(err.Error(), "workingDir") {
+		t.Fatalf("runArgs accepted relative workingDir: %v", err)
+	}
+	pod.Spec.Containers[0].WorkingDir = "/app/../work"
 	delete(pod.ObjectMeta.Annotations, nativeDisablePortForwardAnnotation)
 	args, err = manager.runArgs(pod, pod.Spec.Containers[0], managed)
 	if err != nil {
