@@ -165,7 +165,7 @@ func validateNFSMountOptions(options []string) error {
 			if !hasValue || (value != "3" && value != "4") {
 				return fmt.Errorf("mount option %q must be 3 or 4", key)
 			}
-		case "port", "rsize", "wsize", "timeo", "retrans":
+		case "port", "mountport", "rsize", "wsize", "timeo", "retrans":
 			if !hasValue {
 				return fmt.Errorf("mount option %q requires a numeric value", key)
 			}

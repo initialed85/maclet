@@ -17,7 +17,7 @@ func (m *workloadManager) mountGenericNFSVolume(ctx context.Context, pod Pod, vo
 	if m.journalPath == "" || m.nfsRoot == "" {
 		return "", errors.New("NFS volumes require a state-backed workload manager")
 	}
-	resolved, err := resolveGenericNFSVolume(ctx, m.apiClient, pod.ObjectMeta.Namespace, Volume{VolumeSource: VolumeSource{PersistentVolumeClaim: source}})
+	resolved, err := resolveNFSVolumeForPod(ctx, m.apiClient, pod, Volume{VolumeSource: VolumeSource{PersistentVolumeClaim: source}})
 	if err != nil {
 		return "", err
 	}
