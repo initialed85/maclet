@@ -23,7 +23,7 @@ func TestResolveNFSVolumeForPodUsesGenericHandoff(t *testing.T) {
 		t.Fatal(err)
 	}
 	options := strings.Join(got.MountOptions, ",")
-	if got.Server != "10.43.1.70" || got.Share != "/export" || !got.ReadOnly || !strings.Contains(options, "mountport=20048") || !strings.Contains(options, "nolocks") || !strings.Contains(options, "resvport") {
+	if got.Server != "10.43.1.70" || got.Share != "/export" || !got.ReadOnly || !strings.Contains(options, "mountport=20048") || !strings.Contains(options, "locallocks") || !strings.Contains(options, "resvport") {
 		t.Fatalf("handoff = %#v", got)
 	}
 }
