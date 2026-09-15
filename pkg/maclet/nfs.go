@@ -31,12 +31,12 @@ func resolveGenericNFSVolume(ctx context.Context, client *APIClient, namespace s
 		return genericNFSVolume{}, errors.New("volume is not a named PersistentVolumeClaim")
 	}
 	if client == nil {
-		return genericNFSVolume{}, errors.New("NFS PVC resolution requires an authorized peer API client")
+		return genericNFSVolume{}, missingPeerStorageClientError("NFS PVC/PV")
 	}
 	claimPath := "/api/v1/namespaces/" + url.PathEscape(namespace) + "/persistentvolumeclaims/" + url.PathEscape(claimSource.ClaimName)
 	claimBody, err := client.Get(ctx, claimPath)
 	if err != nil {
-		return genericNFSVolume{}, fmt.Errorf("get PVC %s/%s: %w", namespace, claimSource.ClaimName, err)
+		return genericNFSVolume{}, fmt.Errorf("get PVC %s/%s: %w", namespace, claimSource.ClaimName, authorizedPeerStorageError("PVC "+namespace+"/"+claimSource.ClaimName, err))
 	}
 	var claim PersistentVolumeClaim
 	if err := json.Unmarshal(claimBody, &claim); err != nil {
@@ -51,7 +51,7 @@ func resolveGenericNFSVolume(ctx context.Context, client *APIClient, namespace s
 	pvPath := "/api/v1/persistentvolumes/" + url.PathEscape(claim.Spec.VolumeName)
 	pvBody, err := client.Get(ctx, pvPath)
 	if err != nil {
-		return genericNFSVolume{}, fmt.Errorf("get PV %s: %w", claim.Spec.VolumeName, err)
+		return genericNFSVolume{}, fmt.Errorf("get PV %s: %w", claim.Spec.VolumeName, authorizedPeerStorageError("PV "+claim.Spec.VolumeName, err))
 	}
 	var pv PersistentVolume
 	if err := json.Unmarshal(pvBody, &pv); err != nil {

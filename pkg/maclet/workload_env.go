@@ -98,7 +98,7 @@ func (m *workloadManager) getConfigMap(ctx context.Context, namespace, name stri
 	}
 	client := m.workloadAPIClient()
 	if client == nil {
-		return ConfigMap{}, false, errors.New("ConfigMap lookup requires an authorized peer API client")
+		return ConfigMap{}, false, missingPeerStorageClientError("ConfigMap")
 	}
 	body, err := client.Get(ctx, "/api/v1/namespaces/"+url.PathEscape(namespace)+"/configmaps/"+url.PathEscape(name))
 	if err != nil {
@@ -106,7 +106,7 @@ func (m *workloadManager) getConfigMap(ctx context.Context, namespace, name stri
 		if optional && errors.As(err, &apiErr) && apiErr.Code == http.StatusNotFound {
 			return ConfigMap{}, false, nil
 		}
-		return ConfigMap{}, false, err
+		return ConfigMap{}, false, authorizedPeerStorageError("ConfigMap "+namespace+"/"+name, err)
 	}
 	var configMap ConfigMap
 	if err := json.Unmarshal(body, &configMap); err != nil {
@@ -121,7 +121,7 @@ func (m *workloadManager) getSecret(ctx context.Context, namespace, name string,
 	}
 	client := m.workloadAPIClient()
 	if client == nil {
-		return Secret{}, false, errors.New("Secret lookup requires an authorized peer API client")
+		return Secret{}, false, missingPeerStorageClientError("Secret")
 	}
 	body, err := client.Get(ctx, "/api/v1/namespaces/"+url.PathEscape(namespace)+"/secrets/"+url.PathEscape(name))
 	if err != nil {
@@ -129,7 +129,7 @@ func (m *workloadManager) getSecret(ctx context.Context, namespace, name string,
 		if optional && errors.As(err, &apiErr) && apiErr.Code == http.StatusNotFound {
 			return Secret{}, false, nil
 		}
-		return Secret{}, false, err
+		return Secret{}, false, authorizedPeerStorageError("Secret "+namespace+"/"+name, err)
 	}
 	var secret Secret
 	if err := json.Unmarshal(body, &secret); err != nil {

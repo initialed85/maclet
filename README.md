@@ -389,12 +389,13 @@ mappings are also rejected. An absolute `workingDir` is passed to Macker and
 overrides the image working directory. `hostNetwork: true` is supported with
 `dnsPolicy: ClusterFirstWithHostNet`; it uses Macker host networking, reports
 the node IP as both PodIP and HostIP, and does not allocate a PodCIDR alias.
-Other host-network DNS policies remain Pending. `envFrom` supports ConfigMap and Secret
-references through the authorized peer API client, and downward-API `fieldRef`
-supports Pod identity, node/IP, labels, and annotations. Missing required
-references and unsupported field sources remain Pending. The controller
-identity or an explicit peer kubeconfig must be authorized to read referenced
-ConfigMaps and Secrets. Generic NFS PVC wiring is now present behind the
+Other host-network DNS policies remain Pending. `envFrom` supports ConfigMap and Secret references only through an explicitly
+configured, authorized peer kubeconfig; the token-backed
+`system:k3s-controller` identity is not assumed to read storage/configuration
+objects. Downward-API `fieldRef` supports Pod identity, node/IP, labels, and
+annotations. Missing required references, API 403s, absent peer credentials,
+and unsupported field sources remain Pending with actionable
+`--peer-kubeconfig` guidance. Generic NFS PVC wiring is now present behind the
 `nfs.csi.k8s.io` PV gate: maclet resolves the Bound PVC/PV, mounts the export
 under a journaled state path through sudo-owned `mount_nfs`, and passes the
 mounted path through Macker. This remains experimental until a real macOS NFS

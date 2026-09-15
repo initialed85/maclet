@@ -289,9 +289,12 @@ Macker container, maclet archives up to 1 MiB of its logs into a state-owned
 retention file. Retained records remain addressable by namespace, Pod UID, and
 container across restart and are served by the kubelet logs handler after
 Macker cleanup; a configurable 24-hour TTL prunes records and files.
-ConfigMap and Secret lookups
-use the controller or explicitly configured peer API identity; the restricted
-system:node identity is not broadened. A separate cleanup controller can
+ConfigMap, Secret, PVC, and PV lookups require an explicitly configured,
+authorized peer API identity. The token-backed `system:k3s-controller`
+identity is intentionally not assumed to read namespace storage/configuration
+objects, and the restricted `system:node` identity is not broadened. Missing
+peer credentials or API 403s remain Pending with actionable
+`--peer-kubeconfig` guidance. A separate cleanup controller can
 force-delete old terminating native Pod objects using a narrowly scoped cluster
 identity; maclet itself does not broaden the node identity with general
 Pod-delete permission.

@@ -71,7 +71,7 @@ func runJoinCommand(args []string) error {
 	flags.StringVar(&cfg.VXLANRemote, "vxlan-remote", "", "VXLAN remote underlay address")
 	flags.StringVar(&cfg.VXLANLocal, "vxlan-local", "", "VXLAN local underlay address (defaults to --node-ip)")
 	flags.StringVar(&cfg.VXLANGatewayMAC, "vxlan-gateway-mac", "", "static remote flannel.1 MAC override (normally discovered through the K3s controller client)")
-	flags.StringVar(&cfg.PeerKubeconfig, "peer-kubeconfig", "", "optional kubeconfig override for peer Flannel discovery and privileged cleanup")
+	flags.StringVar(&cfg.PeerKubeconfig, "peer-kubeconfig", "", "explicitly authorized kubeconfig for peer discovery, storage/config reads, and privileged cleanup")
 	flags.StringVar(&cfg.PeerContext, "peer-context", "", "kubeconfig context used for peer discovery (defaults to the current context)")
 	flags.IntVar(&cfg.VXLANPort, "vxlan-port", defaultVXLANPort, "VXLAN UDP port")
 	flags.IntVar(&cfg.VXLANMTU, "vxlan-mtu", defaultVXLANMTU, "VXLAN bridge MTU")

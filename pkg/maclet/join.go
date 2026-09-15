@@ -136,13 +136,15 @@ func runJoinSession(ctx context.Context, cfg JoinConfig) error {
 			workloads.logTTL = cfg.NativeLogTTL
 		}
 		workloads.useSudo = cfg.useSudo
-		workloads.apiClient = peerClient
-		if workloads.apiClient == nil {
-			if workloadClient, peerErr := peerAPIClient(cfg, state); peerErr != nil {
-				log.Printf("warning: workload ConfigMap/Secret lookups unavailable: %v", peerErr)
-			} else {
-				workloads.apiClient = workloadClient
-			}
+		if configured, found, peerErr := configuredPeerAPIClient(cfg, state); peerErr != nil {
+			log.Printf("warning: workload storage/config lookups unavailable: %v", peerErr)
+		} else if found {
+			// Storage/configuration reads require an explicitly authorized peer
+			// identity. The token-backed controller client is intentionally only
+			// used for Flannel peer discovery and is not assumed to read these APIs.
+			workloads.apiClient = configured
+		} else {
+			log.Printf("warning: workload storage/config lookups unavailable: configure --peer-kubeconfig with PVC/PV, ConfigMap, and Secret read access")
 		}
 		workloads.debug = cfg.Debug
 		if err := workloads.loadJournal(); err != nil {
