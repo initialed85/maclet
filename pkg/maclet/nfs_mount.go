@@ -16,6 +16,7 @@ type nfsMountSpec struct {
 	Share        string   `json:"share"`
 	MountOptions []string `json:"mountOptions,omitempty"`
 	ReadOnly     bool     `json:"readOnly,omitempty"`
+	LegacyFlags  bool     `json:"legacyFlags,omitempty"`
 }
 
 func nfsMountCommandArgs(spec nfsMountSpec, target string) ([]string, error) {
@@ -38,6 +39,17 @@ func nfsMountCommandArgs(spec nfsMountSpec, target string) ([]string, error) {
 		options = append(options, "ro")
 	}
 	args := []string{"mount_nfs"}
+	if spec.LegacyFlags {
+		args = append(args, "-L", "-P", "-T", "-3")
+		legacyOptions := make([]string, 0, len(options))
+		for _, option := range options {
+			key, _, _ := strings.Cut(option, "=")
+			if key == "mountport" || key == "port" || key == "ro" {
+				legacyOptions = append(legacyOptions, option)
+			}
+		}
+		options = legacyOptions
+	}
 	if len(options) != 0 {
 		args = append(args, "-o", strings.Join(options, ","))
 	}

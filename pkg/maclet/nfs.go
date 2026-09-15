@@ -23,6 +23,7 @@ type genericNFSVolume struct {
 	Subdir       string
 	MountOptions []string
 	ReadOnly     bool
+	LegacyFlags  bool
 }
 
 func resolveGenericNFSVolume(ctx context.Context, client *APIClient, namespace string, volume Volume) (genericNFSVolume, error) {

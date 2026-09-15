@@ -27,7 +27,7 @@ func (m *workloadManager) mountGenericNFSVolume(ctx context.Context, pod Pod, vo
 		return "", fmt.Errorf("volume name %q is invalid", volumeName)
 	}
 	target := filepath.Join(m.nfsRoot, workloadContainerName(pod), volumeKey)
-	spec := nfsMountSpec{Server: resolved.Server, Share: resolved.Share, MountOptions: resolved.MountOptions, ReadOnly: resolved.ReadOnly}
+	spec := nfsMountSpec{Server: resolved.Server, Share: resolved.Share, MountOptions: resolved.MountOptions, ReadOnly: resolved.ReadOnly, LegacyFlags: resolved.LegacyFlags}
 	probe := m.isMountpoint
 	if probe == nil {
 		probe = probeNFSMount
