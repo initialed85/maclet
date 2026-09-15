@@ -157,7 +157,7 @@ func validateNFSMountOptions(options []string) error {
 		}
 		seen[key] = true
 		switch key {
-		case "hard", "soft", "resvport", "nolock", "tcp", "udp":
+		case "hard", "soft", "resvport", "nolock", "nolocks", "nolockd", "tcp", "udp":
 			if hasValue {
 				return fmt.Errorf("mount option %q does not take a value", key)
 			}

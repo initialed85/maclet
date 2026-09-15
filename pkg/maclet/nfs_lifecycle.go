@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -58,6 +59,11 @@ func (m *workloadManager) mountGenericNFSVolume(ctx context.Context, pod Pod, vo
 	if mount == nil {
 		mount = func(ctx context.Context, useSudo bool, spec nfsMountSpec, target string) error {
 			return runNFSMount(ctx, useSudo, spec, target)
+		}
+	}
+	if m.debug {
+		if args, argsErr := nfsMountCommandArgs(spec, target); argsErr == nil {
+			log.Printf("debug: generic NFS mount command: %s", formatCommandArgs(args))
 		}
 	}
 	if err := mount(ctx, m.useSudo, spec, target); err != nil {

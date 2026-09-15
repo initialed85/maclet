@@ -63,7 +63,7 @@ func resolveNFSVolumeForPod(ctx context.Context, client *APIClient, pod Pod, vol
 		ClaimName:    volume.PersistentVolumeClaim.ClaimName,
 		Server:       server,
 		Share:        share,
-		MountOptions: []string{"mountport=" + strconv.Itoa(mountPort), "vers=3", "tcp", "nolock", "resvport"},
+		MountOptions: []string{"mountport=" + strconv.Itoa(mountPort), "vers=3", "tcp", "nolocks", "resvport"},
 		ReadOnly:     volume.PersistentVolumeClaim.ReadOnly,
 	}, nil
 }
