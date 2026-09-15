@@ -26,6 +26,9 @@ func TestResolveNFSVolumeForPodUsesGenericHandoff(t *testing.T) {
 	if got.Server != "10.43.1.70" || got.Share != "/export" || !got.ReadOnly || !strings.Contains(options, "mountport=20048") || !strings.Contains(options, "locallocks") || !strings.Contains(options, "resvport") {
 		t.Fatalf("handoff = %#v", got)
 	}
+	if _, err := nfsMountCommandArgs(nfsMountSpec{Server: got.Server, Share: got.Share, MountOptions: got.MountOptions, ReadOnly: got.ReadOnly}, "/tmp/gateway-nfs"); err != nil {
+		t.Fatalf("handoff mount command validation = %v", err)
+	}
 }
 
 func TestResolveNFSVolumeForPodRejectsIncompleteOrStaleHandoff(t *testing.T) {
