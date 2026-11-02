@@ -14,7 +14,7 @@ const networkServiceOrderFixture = `An asterisk (*) denotes that a network servi
 *(2) USB JTAG/serial debug unit 2
 (Hardware Port: USB JTAG/serial debug unit, Device: usbmodem1101)
 
-(3) USB 10/100/1000 LAN
+(3) AX88179
 (Hardware Port: AX88179, Device: en13)
 
 (4) Thunderbolt Bridge
@@ -26,7 +26,7 @@ func TestParseNetworkServiceDevice(t *testing.T) {
 		device string
 		want   string
 	}{
-		{device: "en13", want: "USB 10/100/1000 LAN"},
+		{device: "en13", want: "AX88179"},
 		{device: "en0", want: "Wi-Fi"},
 		{device: "bridge0", want: "Thunderbolt Bridge"},
 		{device: "usbmodem1101", want: ""},
@@ -69,8 +69,8 @@ func TestSplitSearchDomains(t *testing.T) {
 }
 
 func TestSearchDomainsArgsClearsServiceWhenEmpty(t *testing.T) {
-	args := searchDomainsArgs("USB 10/100/1000 LAN", nil)
-	want := []string{"-setsearchdomains", "USB 10/100/1000 LAN", networksetupNoSearchValue}
+	args := searchDomainsArgs("AX88179", nil)
+	want := []string{"-setsearchdomains", "AX88179", networksetupNoSearchValue}
 	if !sameStrings(args, want) {
 		t.Fatalf("got %v want %v", args, want)
 	}
@@ -166,11 +166,11 @@ func TestClusterDNSSearchDomainsReconcileIsIdempotent(t *testing.T) {
 	if len(sets) != 1 {
 		t.Fatalf("expected one set call, got %d: %v", len(sets), sets)
 	}
-	want := []string{"-setsearchdomains", "USB 10/100/1000 LAN", "svc.cluster.local", "cluster.local"}
+	want := []string{"-setsearchdomains", "AX88179", "svc.cluster.local", "cluster.local"}
 	if !sameStrings(sets[0], want) {
 		t.Fatalf("got %v want %v", sets[0], want)
 	}
-	if search.service != "USB 10/100/1000 LAN" || search.resolvedDevice != "en13" {
+	if search.service != "AX88179" || search.resolvedDevice != "en13" {
 		t.Fatalf("resolved service/device: %q %q", search.service, search.resolvedDevice)
 	}
 	if err := search.reconcile(ctx); err != nil {
@@ -217,7 +217,7 @@ func TestClusterDNSSearchDomainsReleaseServiceWhenForeignEntryAppears(t *testing
 		t.Fatalf("maclet should release a service a VPN client joined")
 	}
 	sets := fake.sets()
-	want := []string{"-setsearchdomains", "USB 10/100/1000 LAN", "ts.net"}
+	want := []string{"-setsearchdomains", "AX88179", "ts.net"}
 	if !sameStrings(sets[len(sets)-1], want) {
 		t.Fatalf("last set call: got %v want %v", sets[len(sets)-1], want)
 	}
@@ -239,7 +239,7 @@ func TestClusterDNSSearchDomainsCleanupRestoresPreviousState(t *testing.T) {
 		t.Fatalf("cleanup: %v", err)
 	}
 	sets := fake.sets()
-	want := []string{"-setsearchdomains", "USB 10/100/1000 LAN", networksetupNoSearchValue}
+	want := []string{"-setsearchdomains", "AX88179", networksetupNoSearchValue}
 	if !sameStrings(sets[len(sets)-1], want) {
 		t.Fatalf("last set call: got %v want %v", sets[len(sets)-1], want)
 	}
@@ -259,7 +259,7 @@ func TestClusterDNSSearchDomainsCleanupKeepsForeignDomains(t *testing.T) {
 		t.Fatalf("cleanup: %v", err)
 	}
 	sets := fake.sets()
-	want := []string{"-setsearchdomains", "USB 10/100/1000 LAN", "corp.example"}
+	want := []string{"-setsearchdomains", "AX88179", "corp.example"}
 	if !sameStrings(sets[len(sets)-1], want) {
 		t.Fatalf("last set call: got %v want %v", sets[len(sets)-1], want)
 	}
@@ -294,7 +294,7 @@ func TestClusterDNSSearchDomainsHonoursCustomDomains(t *testing.T) {
 		t.Fatalf("reconcile: %v", err)
 	}
 	sets := fake.sets()
-	want := []string{"-setsearchdomains", "USB 10/100/1000 LAN", "lab.internal", "cluster.local"}
+	want := []string{"-setsearchdomains", "AX88179", "lab.internal", "cluster.local"}
 	if !sameStrings(sets[0], want) {
 		t.Fatalf("got %v want %v", sets[0], want)
 	}
@@ -345,7 +345,7 @@ func TestSearchDomainsStateRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	search, _ := newTestSearchDomains()
 	if search.service == "" {
-		search.service = "USB 10/100/1000 LAN"
+		search.service = "AX88179"
 		search.resolvedDevice = "en13"
 	}
 	if err := writeSearchDomainsState(dir, search); err != nil {
@@ -355,7 +355,7 @@ func TestSearchDomainsStateRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read state: %v", err)
 	}
-	if record == nil || record.Service != "USB 10/100/1000 LAN" || record.Device != "en13" {
+	if record == nil || record.Service != "AX88179" || record.Device != "en13" {
 		t.Fatalf("record: %+v", record)
 	}
 	if !sameStrings(record.Domains, defaultSearchDomains) {

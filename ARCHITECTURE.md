@@ -258,8 +258,14 @@ The search list is a separate, best-effort mechanism. maclet writes
 underlay address with `networksetup -setsearchdomains`, then reads
 `scutil --dns` to confirm the domains are live. A service already carrying foreign
 search domains is left alone, foreign domains that appear later are handed back,
-and a `State:/Network/Global/DNS` override is reported rather than contested,
-because per-service search domains are inert while a global override is installed.
+and a live-resolver mismatch is reported rather than contested. The mismatch is
+worth reading: a device can have several network services and only the one macOS
+treats as primary feeds `State:/Network/Global/DNS`, so writing to an inactive
+service is accepted and ignored. macOS also applies search suffixes only to names
+without a dot, and CoreDNS holds no `<service>.svc.cluster.local` record, so a
+bare Service name needs a namespace suffix such as `woodpecker.svc.cluster.local`,
+published with `--dns-search-domain`, while two-label and fully qualified names
+bypass the search list entirely.
 The applied service and list are recorded in `<state-dir>/search-domains.json` so
 `maclet leave` reverses the join's change. Search domains cannot be scoped per
 Pod: macOS stores them per network service.

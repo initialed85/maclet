@@ -605,26 +605,55 @@ workloads; macOS does not receive each Kubernetes Pod's namespace-specific
 
 ### Search domains
 
-maclet also publishes the Kubernetes search list. `--dns-search-domains` is
-enabled for long-running VXLAN joins and writes `svc.cluster.local` then
-`cluster.local` onto the macOS network service that owns the underlay address,
-through `networksetup -getsearchdomains` and `-setsearchdomains` via `sudo -n`:
+maclet also publishes a Kubernetes-style search list. `--dns-search-domains` is
+enabled for long-running VXLAN joins and writes the list onto the macOS network
+service that owns the underlay device, resolved from
+`networksetup -listnetworkserviceorder` and written with
+`networksetup -setsearchdomains` through `sudo -n`:
 
 ```sh
-networksetup -getsearchdomains "USB 10/100/1000 LAN"
+networksetup -getsearchdomains "AX88179"
+woodpecker.svc.cluster.local
 svc.cluster.local
 cluster.local
 ```
 
-maclet writes the list and then reads `scutil --dns` to check macOS is actually
-using it. It stands aside instead of fighting the host in two cases:
+maclet writes the list and then reads `scutil --dns` to confirm macOS is using it,
+which matters because a device can have several network services and only one of
+them is active. Measured on a Mac with an AX88179 underlay: writing to the
+inactive service for the same device was accepted by `networksetup` and ignored by
+the resolver, while writing to the active service replaced a stale `ts.net` entry
+left behind by a VPN client and took effect immediately —
+
+```sh
+ping -c1 woodpecker-server
+PING woodpecker-server.woodpecker.svc.cluster.local (10.43.60.254)
+```
+
+The list you publish matters more than the mechanism. macOS appends search suffixes
+only to names without a dot, and CoreDNS holds no `<service>.svc.cluster.local`
+record, so `svc.cluster.local cluster.local` alone resolves nothing; the
+namespace entry is what makes a bare Service name work:
+
+```sh
+maclet join … --dns-search-domain woodpecker.svc.cluster.local
+```
+
+Two-label names such as `woodpecker-server.woodpecker` are queried verbatim and
+never suffixed, so they still need the fully qualified form — that is why the
+Woodpecker darwin agent dials `woodpecker-server.woodpecker.svc.cluster.local`.
+Unrelated lookups are unaffected apart from a failed suffix attempt first: a
+control A/B on the same host showed the same failure for a name that never
+resolved, and public names resolving identically either way.
+
+maclet stands aside instead of fighting the host in two cases:
 
 - the service already carries search domains set by something else (DHCP, or a VPN
   client such as Tailscale's `ts.net`): maclet does not touch that service, and if
   a foreign domain appears while maclet owns the service, maclet removes its own
   entries and releases it;
-- a global DNS override (`State:/Network/Global/DNS`) shadows per-service
-  settings: macOS then ignores what maclet wrote, so maclet logs the domains the
+- macOS is not using what maclet wrote (an inactive service was targeted, or a
+  global override is shadowing per-service settings): maclet logs the domains the
   live resolver does carry and points at fully qualified names or
   `--dns-search-domains=false`.
 
@@ -635,7 +664,8 @@ and restores anything a foreign manager added meanwhile. Use `--dns-search-domai
 device lookup picks the wrong service. One host-wide list is the ceiling: macOS
 attaches search domains to a network service rather than to a process, so maclet
 cannot reproduce each Pod's namespace-specific `search` list the way a Linux CNI
-can.
+can; deriving the suffixes from the namespaces this node actually hosts workloads
+in is the obvious next step.
 
 ## Current boundaries and next steps
 
