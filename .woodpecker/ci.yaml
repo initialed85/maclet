@@ -1,0 +1,23 @@
+# Maclet: the small Kubernetes-node agent written in Go. The gate is fmt, vet, the tests and a build of
+# the binary, on the go.mod line (1.22).
+#
+# The 23 test files are unit tests and pass with no cluster and no docker daemon (verified on this
+# machine: go test -count=1 ./... is clean). ./test-native-workload-lifecycle.sh is the one that needs a
+# real Mac with a running maclet, so it is not a CI step here; the Darwin runner is the place it belongs
+# once maclet is wired to it.
+steps:
+  - name: test
+    image: docker.io/library/golang:1.22
+    commands:
+      - go version
+      - gofmt -l .
+      - test -z "$(gofmt -l .)"
+      - go vet ./...
+      - go test -count=1 ./...
+      - go build -o maclet .
+      - ls -l maclet
+
+when:
+  - event: push
+    branch: master
+  - event: pull_request
