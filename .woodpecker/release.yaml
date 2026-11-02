@@ -18,6 +18,13 @@
 #
 # The token is the native Secret woodpecker/github-token mapped to PLUGIN_TOKEN by
 # backend_options.kubernetes.secrets; no credential appears in this file.
+#
+# What the publish step depends on, learned the hard way: it hands wp-gh-release a glob and the plugin
+# replaces any asset whose name already exists, so a re-run cannot 422. That name match is exact and
+# client-side, because GitHub's list-assets endpoint accepts a `name` query parameter and ignores it - ask
+# for one asset and you get all of them. An earlier revision deleted what it was handed, and this repo is
+# how it was found: build-39 published with maclet-darwin-arm64.tar.gz.sha256 on the release and the 6.3 MB
+# binary missing, pipeline green.
 steps:
   - name: resolve-build-number
     image: docker.io/library/golang:1.26.5
