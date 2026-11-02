@@ -12,16 +12,25 @@ import (
 )
 
 const (
-	networksetupBinary        = "networksetup"
-	networksetupNoSearchValue = "None"
+	networksetupBinary = "networksetup"
+	// `Empty` is the value networksetup accepts to clear search domains. `None` is
+	// not: macOS stores it verbatim, so the host ends up with a search domain
+	// literally called None, visible in `scutil --dns` as well as
+	// `-getsearchdomains`. Clearing with `Empty` instead exposes the service's base
+	// configuration again, which on a Mac that once ran a VPN client is that
+	// client's leftover domain.
+	networksetupNoSearchValue = "Empty"
 )
 
-// defaultSearchDomains mirrors the Kubernetes search list a Pod receives, minus
-// the namespace-specific entry. macOS attaches search domains to a network
-// service rather than to a process, so maclet can only publish one host-wide
-// list. `svc.cluster.local` first keeps the familiar `service.namespace` form one
-// lookup away from resolving, and `cluster.local` last makes the domain-scoped
-// /etc/resolver/cluster.local file and the search list agree.
+// defaultSearchDomains is the tail of the Kubernetes search list a Pod receives.
+// macOS attaches search domains to a network service rather than to a process, so
+// maclet publishes one host-wide list. macOS applies those suffixes only to names
+// without a dot and CoreDNS has no `<service>.svc.cluster.local` record, so a bare
+// Service name needs the namespace entry too (for example
+// `--dns-search-domain woodpecker.svc.cluster.local`); `svc.cluster.local` and
+// `cluster.local` are what make fully qualified and `.svc` names land on the
+// cluster resolver, and `cluster.local` last keeps the search list and the
+// domain-scoped /etc/resolver/cluster.local file in agreement.
 var defaultSearchDomains = []string{"svc.cluster.local", "cluster.local"}
 
 type searchDomainRunner func(ctx context.Context, privileged bool, args ...string) ([]byte, error)
@@ -126,8 +135,8 @@ func (s *clusterDNSSearchDomains) reconcile(ctx context.Context) error {
 			return nil
 		}
 		if !s.foreignLogged {
-			log.Printf("search domains on %s are already configured (%s); maclet will not manage search domains on this service",
-				s.service, strings.Join(foreign, ", "))
+			log.Printf("search domains on %s are already configured (%s) that maclet was not asked to publish (maclet would publish %s); pass --dns-search-domain for each domain you want maclet to own, or --dns-search-domains=false to leave them alone",
+				s.service, strings.Join(foreign, ", "), strings.Join(s.domains, ", "))
 			s.foreignLogged = true
 		}
 		return nil
@@ -273,6 +282,12 @@ func normalizeSearchDomains(domains []string) []string {
 	for _, domain := range domains {
 		domain = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(domain)), ".")
 		if domain == "" || seen[domain] {
+			continue
+		}
+		// Placeholders networksetup can echo back are not domains. Older maclet
+		// releases wrote `None`, and macOS keeps it as a real search domain, so
+		// ignore it rather than treating it as a foreign manager.
+		if domain == "none" || domain == "empty" {
 			continue
 		}
 		seen[domain] = true

@@ -43,6 +43,9 @@ func TestParseSearchDomains(t *testing.T) {
 	if got := parseSearchDomains([]byte("There aren't any Search Domains set on USB 10/100/1000 LAN.\n")); len(got) != 0 {
 		t.Fatalf("empty sentence parsed as %v", got)
 	}
+	if got := parseSearchDomains([]byte("None.\n")); len(got) != 0 {
+		t.Fatalf("networksetup placeholder parsed as %v", got)
+	}
 	got := parseSearchDomains([]byte("SVC.Cluster.Local.\ncluster.local\n"))
 	want := []string{"svc.cluster.local", "cluster.local"}
 	if !sameStrings(got, want) {
@@ -51,7 +54,7 @@ func TestParseSearchDomains(t *testing.T) {
 }
 
 func TestNormalizeSearchDomains(t *testing.T) {
-	got := normalizeSearchDomains([]string{"Cluster.Local", " cluster.local ", "", "svc.cluster.local.", "Cluster.Local"})
+	got := normalizeSearchDomains([]string{"Cluster.Local", " cluster.local ", "", "svc.cluster.local.", "Cluster.Local", "None", "Empty"})
 	want := []string{"cluster.local", "svc.cluster.local"}
 	if !sameStrings(got, want) {
 		t.Fatalf("got %v want %v", got, want)
@@ -150,6 +153,46 @@ func newTestSearchDomains() (*clusterDNSSearchDomains, *fakeSearchDomainRunner) 
 	search.runner = fake.run
 	search.scutilRunner = fake.scutil
 	return search, fake
+}
+
+// A custom list replaces the defaults rather than adding to them, so publishing a
+// namespace suffix means publishing the whole chain you want the host to carry.
+func TestClusterDNSSearchDomainsCustomListReplacesDefaults(t *testing.T) {
+	if got := newClusterDNSSearchDomains(true, "en13", "", "woodpecker.svc.cluster.local").domains; !sameStrings(got, []string{"woodpecker.svc.cluster.local"}) {
+		t.Fatalf("got %v want [woodpecker.svc.cluster.local]", got)
+	}
+
+	ctx := context.Background()
+	partial, fake := newTestSearchDomains()
+	fake.current = []string{"woodpecker.svc.cluster.local", "svc.cluster.local", "cluster.local"}
+	partial.domains = []string{"woodpecker.svc.cluster.local"}
+	if err := partial.reconcile(ctx); err != nil {
+		t.Fatalf("partial reconcile: %v", err)
+	}
+	if partial.owned {
+		t.Fatalf("maclet must not own a service whose domains it cannot all publish")
+	}
+	if sets := fake.sets(); len(sets) != 0 {
+		t.Fatalf("expected no write for a list maclet cannot fully publish, got %v", sets)
+	}
+
+	full, fullFake := newTestSearchDomains()
+	fullFake.current = []string{"woodpecker.svc.cluster.local", "svc.cluster.local", "cluster.local"}
+	full.domains = []string{"woodpecker.svc.cluster.local", "svc.cluster.local", "cluster.local"}
+	if err := full.reconcile(ctx); err != nil {
+		t.Fatalf("full reconcile: %v", err)
+	}
+	if !full.owned {
+		t.Fatalf("expected maclet to own the service when it publishes every domain")
+	}
+	sets := fullFake.sets()
+	if len(sets) != 1 {
+		t.Fatalf("expected one set call, got %v", sets)
+	}
+	want := []string{"-setsearchdomains", "AX88179", "woodpecker.svc.cluster.local", "svc.cluster.local", "cluster.local"}
+	if !sameStrings(sets[0], want) {
+		t.Fatalf("got %v want %v", sets[0], want)
+	}
 }
 
 func TestClusterDNSSearchDomainsReconcileIsIdempotent(t *testing.T) {
