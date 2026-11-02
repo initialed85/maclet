@@ -1,0 +1,71 @@
+# GitHub Release on every push to master — the port of .github/workflows/release.yml (deleted in the same
+# commit): build darwin/arm64, tar it with a sha256, publish with GitHub's generated notes.
+#
+# Same four translations as macker's release.yaml, in short: no matrix (a Woodpecker matrix multiplies the
+# whole workflow, which would publish twice; one workspace is shared by the steps instead), no
+# upload/download-artifact pair, the `build-N` tag derived from the tags that already exist rather than the
+# pipeline number (GitHub's run_number for this repo is far past 1 and Woodpecker's counter restarts at 1,
+# so the pipeline number would re-tag an old release - the plugin reuses the release for a tag by design),
+# and settings.generate_notes + glob settings.files standing in for softprops' generate_release_notes and
+# `files: dist/*.tar.gz` with `if-no-files-found: error`.
+#
+# maclet is Go with CGO disabled, so a darwin/arm64 cross-compile needs no macOS toolchain and this runs on
+# the Linux pool. The Mac lane is only for what genuinely needs Darwin (Swift, pkgbuild).
+#
+# `file` is not in the golang image, so the artifact's format is asserted from its magic bytes instead:
+# cffaedfe is Mach-O 64-bit (MH_MAGIC_64 as stored, little-endian), 7f454c46 is ELF. A release that shipped
+# a Linux binary because a GOOS went missing is exactly the mistake this catches.
+#
+# The token is the native Secret woodpecker/github-token mapped to PLUGIN_TOKEN by
+# backend_options.kubernetes.secrets; no credential appears in this file.
+steps:
+  - name: resolve-build-number
+    image: docker.io/library/golang:1.26.5
+    commands:
+      # --refs so annotated tags are not listed twice (ref plus its peeled ^{} entry). Written to files so
+      # a failed ls-remote is a step failure, not an empty variable that quietly yields build-1.
+      - git ls-remote --tags --refs "https://github.com/$CI_REPO.git" > build-tags.txt
+      - test -s build-tags.txt
+      - sed -n 's#.*refs/tags/##p' build-tags.txt | grep -E '^build-[0-9]+$' | sort -V | tail -n 1 | sed 's#^build-##' > build-number.txt
+      - test -s build-number.txt || echo 0 > build-number.txt
+      - mkdir -p .build && echo "build-$(( $(cat build-number.txt) + 1 ))" > .build/TAG
+      - echo "publishing $(cat .build/TAG), derived from the tags that already exist"
+      - sed -n 's#.*refs/tags/##p' build-tags.txt | grep -E '^build-[0-9]+$' | sort -V | tail -n 3
+
+  - name: build-darwin-arm64
+    image: docker.io/library/golang:1.26.5
+    depends_on: [resolve-build-number]
+    commands:
+      - go version
+      - go mod download || go mod download
+      - go vet ./...
+      - go test -count=1 ./...
+      - bash -n test-native-workload-lifecycle.sh
+      - env GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go test -c -o /tmp/maclet-arm64.test .
+      - mkdir -p dist/maclet-darwin-arm64
+      - env GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags '-s -w' -o dist/maclet-darwin-arm64/maclet .
+      - test "$(od -An -tx1 -N 4 dist/maclet-darwin-arm64/maclet | tr -d ' ')" = cffaedfe
+      - tar -C dist -czf dist/maclet-darwin-arm64.tar.gz maclet-darwin-arm64
+      - (cd dist && sha256sum maclet-darwin-arm64.tar.gz > maclet-darwin-arm64.tar.gz.sha256)
+      - ls -l dist
+
+  - name: release
+    image: docker.io/initialed85/wp-gh-release:latest
+    depends_on: [build-darwin-arm64]
+    settings:
+      tag_file: .build/TAG
+      generate_notes: true
+      files:
+        - dist/*.tar.gz
+        - dist/*.sha256
+    backend_options:
+      kubernetes:
+        secrets:
+          - name: github-token
+            key: token
+            target:
+              env: PLUGIN_TOKEN
+
+when:
+  - event: push
+    branch: master
