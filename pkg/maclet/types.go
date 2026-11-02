@@ -27,34 +27,37 @@ type LocalState struct {
 }
 
 type JoinConfig struct {
-	Server                string
-	Token                 string
-	TokenFile             string
-	NodeName              string
-	NodeIP                string
-	Adopt                 bool
-	ExternalIP            string
-	StateDir              string
-	InsecureSkipTLSVerify bool
-	Once                  bool
-	VXLANBinary           string
-	MackerBinary          string
-	Debug                 bool
-	DNSResolver           bool
-	VXLANRemote           string
-	VXLANLocal            string
-	VXLANGatewayMAC       string
-	PeerKubeconfig        string
-	PeerContext           string
-	DrainTimeout          time.Duration
-	NativeLogTTL          time.Duration
-	VXLANPort             int
-	VXLANMTU              int
-	ClusterCIDR           string
-	ServiceCIDR           string
-	clusterCIDRSet        bool
-	serviceCIDRSet        bool
-	useSudo               bool
+	Server                 string
+	Token                  string
+	TokenFile              string
+	NodeName               string
+	NodeIP                 string
+	Adopt                  bool
+	ExternalIP             string
+	StateDir               string
+	InsecureSkipTLSVerify  bool
+	Once                   bool
+	VXLANBinary            string
+	MackerBinary           string
+	Debug                  bool
+	DNSResolver            bool
+	DNSSearchDomains       bool
+	DNSSearchDomainList    []string
+	DNSSearchDomainService string
+	VXLANRemote            string
+	VXLANLocal             string
+	VXLANGatewayMAC        string
+	PeerKubeconfig         string
+	PeerContext            string
+	DrainTimeout           time.Duration
+	NativeLogTTL           time.Duration
+	VXLANPort              int
+	VXLANMTU               int
+	ClusterCIDR            string
+	ServiceCIDR            string
+	clusterCIDRSet         bool
+	serviceCIDRSet         bool
+	useSudo                bool
 }
 
 type VXLANHandle struct {

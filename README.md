@@ -18,6 +18,8 @@ Current capabilities include:
   native processes on direct PodCIDR address aliases;
 - configure macOS's `cluster.local` resolver to use the cluster's CoreDNS
   Service when VXLAN and peer credentials are available;
+- publish Kubernetes `search` domains on the network service that carries the
+  underlay address, standing aside when another manager already owns them;
 - expose kubelet resource metrics for `kubectl top nodes` and `kubectl top pods`;
 - print pods assigned to the node as JSON.
 
@@ -141,7 +143,9 @@ On first join maclet:
    reads Linux Flannel peer annotations with that controller identity, installs
    local Pod/Service routes, and publishes the Flannel Node annotations;
 7. for a long-running VXLAN join, reads the `kube-dns` Service with the node
-   client and configures `/etc/resolver/cluster.local`;
+   client, configures `/etc/resolver/cluster.local`, and publishes Kubernetes
+   search domains on the underlay network service (see
+   [Cluster DNS on macOS](#cluster-dns-on-macos));
 8. updates the Node status and creates the matching `kube-node-lease` Lease.
 
 The client key, certificate, CA, node password, random maclet instance ID,
@@ -598,6 +602,40 @@ Fully qualified names such as
 `my-service.my-namespace.svc.cluster.local` are the reliable form for native
 workloads; macOS does not receive each Kubernetes Pod's namespace-specific
 `resolv.conf` search list.
+
+### Search domains
+
+maclet also publishes the Kubernetes search list. `--dns-search-domains` is
+enabled for long-running VXLAN joins and writes `svc.cluster.local` then
+`cluster.local` onto the macOS network service that owns the underlay address,
+through `networksetup -getsearchdomains` and `-setsearchdomains` via `sudo -n`:
+
+```sh
+networksetup -getsearchdomains "USB 10/100/1000 LAN"
+svc.cluster.local
+cluster.local
+```
+
+maclet writes the list and then reads `scutil --dns` to check macOS is actually
+using it. It stands aside instead of fighting the host in two cases:
+
+- the service already carries search domains set by something else (DHCP, or a VPN
+  client such as Tailscale's `ts.net`): maclet does not touch that service, and if
+  a foreign domain appears while maclet owns the service, maclet removes its own
+  entries and releases it;
+- a global DNS override (`State:/Network/Global/DNS`) shadows per-service
+  settings: macOS then ignores what maclet wrote, so maclet logs the domains the
+  live resolver does carry and points at fully qualified names or
+  `--dns-search-domains=false`.
+
+The service name and domain list a join applied are recorded in
+`<state-dir>/search-domains.json`, so `maclet leave` undoes exactly that change
+and restores anything a foreign manager added meanwhile. Use `--dns-search-domain`
+(repeatable) for a different list and `--dns-search-domain-service` when the
+device lookup picks the wrong service. One host-wide list is the ceiling: macOS
+attaches search domains to a network service rather than to a process, so maclet
+cannot reproduce each Pod's namespace-specific `search` list the way a Linux CNI
+can.
 
 ## Current boundaries and next steps
 

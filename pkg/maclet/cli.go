@@ -54,6 +54,7 @@ func runJoinCommand(args []string) error {
 	flags := flag.NewFlagSet("join", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
 	cfg := JoinConfig{}
+	var dnsSearchDomains stringSliceFlag
 	flags.StringVar(&cfg.Server, "server", "", "Kubernetes/K3s API URL (https://host:6443)")
 	flags.StringVar(&cfg.Token, "token", "", "K3s join token (prefer --token-file to avoid process listings)")
 	flags.StringVar(&cfg.TokenFile, "token-file", "", "read K3s join token from this file, or - for stdin")
@@ -68,6 +69,9 @@ func runJoinCommand(args []string) error {
 	flags.StringVar(&cfg.MackerBinary, "macker-binary", "", "path to Macker; start assigned native Pods through it (defaults to PATH)")
 	flags.BoolVar(&cfg.Debug, "debug", false, "log generated Macker invocations and native workload decisions (may include environment values)")
 	flags.BoolVar(&cfg.DNSResolver, "dns-resolver", true, "configure macOS /etc/resolver/cluster.local to use the cluster DNS Service")
+	flags.BoolVar(&cfg.DNSSearchDomains, "dns-search-domains", true, "publish Kubernetes search domains on the network service that carries the underlay address (set false to leave search domains to DHCP or a VPN client)")
+	flags.Var(&dnsSearchDomains, "dns-search-domain", "search domain to publish, repeatable (defaults to svc.cluster.local then cluster.local)")
+	flags.StringVar(&cfg.DNSSearchDomainService, "dns-search-domain-service", "", "macOS network service name for search domains (defaults to the service owning --vxlan-local/--node-ip)")
 	flags.StringVar(&cfg.VXLANRemote, "vxlan-remote", "", "VXLAN remote underlay address")
 	flags.StringVar(&cfg.VXLANLocal, "vxlan-local", "", "VXLAN local underlay address (defaults to --node-ip)")
 	flags.StringVar(&cfg.VXLANGatewayMAC, "vxlan-gateway-mac", "", "static remote flannel.1 MAC override (normally discovered through the K3s controller client)")
@@ -82,6 +86,7 @@ func runJoinCommand(args []string) error {
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
+	cfg.DNSSearchDomainList = dnsSearchDomains
 	flags.Visit(func(flag *flag.Flag) {
 		switch flag.Name {
 		case "cluster-cidr":

@@ -109,6 +109,7 @@ func runJoinSession(ctx context.Context, cfg JoinConfig) error {
 	var darwinNetwork *DarwinNetworkHandle
 	var workloads *workloadManager
 	var dnsResolver *clusterDNSResolver
+	var dnsSearch *clusterDNSSearchDomains
 	if vxlan != nil {
 		if gatewayMAC == "" {
 			gatewayMAC, err = remoteVtepMAC(ctx, client, cfg.VXLANRemote, cfg.VXLANGatewayMAC)
@@ -184,6 +185,31 @@ func runJoinSession(ctx context.Context, cfg JoinConfig) error {
 				defer cancel()
 				if err := dnsResolver.cleanup(cleanupContext); err != nil {
 					log.Printf("warning: clean cluster DNS resolver: %v", err)
+				}
+			}()
+		}
+		if !cfg.Once && cfg.DNSSearchDomains {
+			device, deviceErr := underlayDeviceForIP(searchDomainUnderlayIP(cfg, state))
+			if deviceErr != nil {
+				log.Printf("warning: cluster DNS search domains unavailable: %v (pass --dns-search-domain-service or --dns-search-domains=false)", deviceErr)
+			} else {
+				dnsSearch = newClusterDNSSearchDomains(cfg.useSudo, device, cfg.DNSSearchDomainService, cfg.DNSSearchDomainList...)
+				if reconcileErr := dnsSearch.reconcile(ctx); reconcileErr != nil {
+					log.Printf("warning: configure cluster DNS search domains: %v", reconcileErr)
+				} else if dnsSearch.owned {
+					if stateErr := writeSearchDomainsState(cfg.StateDir, dnsSearch); stateErr != nil {
+						log.Printf("warning: record cluster DNS search domains: %v", stateErr)
+					}
+				}
+			}
+			defer func() {
+				if dnsSearch == nil {
+					return
+				}
+				cleanupContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
+				if err := dnsSearch.cleanup(cleanupContext); err != nil {
+					log.Printf("warning: clean cluster DNS search domains: %v", err)
 				}
 			}()
 		}
@@ -285,6 +311,11 @@ func runJoinSession(ctx context.Context, cfg JoinConfig) error {
 				}
 				if resolverErr != nil {
 					log.Printf("warning: refresh cluster DNS resolver: %v", resolverErr)
+				}
+			}
+			if dnsSearch != nil {
+				if searchErr := dnsSearch.reconcile(ctx); searchErr != nil {
+					log.Printf("warning: refresh cluster DNS search domains: %v", searchErr)
 				}
 			}
 			if darwinNetwork != nil && peerClient != nil {

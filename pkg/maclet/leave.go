@@ -164,6 +164,9 @@ func runLeave(ctx context.Context, cfg leaveConfig) error {
 	if err := cleanupLeaveResolver(cleanupContext, leaveSudoAvailable()); err != nil {
 		cleanupErrors = append(cleanupErrors, fmt.Errorf("remove macOS cluster DNS resolver: %w", err))
 	}
+	if err := cleanupLeaveSearchDomains(cleanupContext, leaveSudoAvailable(), state.NodeIP, cfg.StateDir); err != nil {
+		cleanupErrors = append(cleanupErrors, fmt.Errorf("remove macOS cluster DNS search domains: %w", err))
+	}
 	if err := leaveClusterResources(cleanupContext, client, state.NodeName); err != nil {
 		cleanupErrors = append(cleanupErrors, err)
 	}

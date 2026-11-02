@@ -253,6 +253,17 @@ search list. Native workloads should therefore use fully qualified names such
 as `service.namespace.svc.cluster.local` when they need deterministic service
 resolution.
 
+The search list is a separate, best-effort mechanism. maclet writes
+`svc.cluster.local` and `cluster.local` onto the network service that owns the
+underlay address with `networksetup -setsearchdomains`, then reads
+`scutil --dns` to confirm the domains are live. A service already carrying foreign
+search domains is left alone, foreign domains that appear later are handed back,
+and a `State:/Network/Global/DNS` override is reported rather than contested,
+because per-service search domains are inert while a global override is installed.
+The applied service and list are recorded in `<state-dir>/search-domains.json` so
+`maclet leave` reverses the join's change. Search domains cannot be scoped per
+Pod: macOS stores them per network service.
+
 ## Workload reconciliation
 
 Only Pods carrying the native workload label and assigned to the Mac are
