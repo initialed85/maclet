@@ -10,6 +10,14 @@ steps:
     image: docker.io/library/golang:1.22
     commands:
       - go version
+      # maclet pipeline 1 failed on a module download, not on code:
+      #   k8s.io/apimachinery@v0.27.1: read "https://proxy.golang.org/...": stream error:
+      #   stream ID 1; INTERNAL_ERROR; received from peer
+      # proxy.golang.org resets HTTP/2 streams under load and `go test` does not retry. The second
+      # attempt reads from the module cache for everything that already landed, so it costs almost
+      # nothing when the first one was fine. The `||` keeps the real exit code: two failures fail the
+      # step.
+      - go mod download || go mod download
       - gofmt -l .
       - test -z "$(gofmt -l .)"
       - go vet ./...
