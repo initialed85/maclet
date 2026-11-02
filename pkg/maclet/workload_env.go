@@ -68,12 +68,9 @@ func (m *workloadManager) resolveContainerEnvironment(ctx context.Context, pod P
 		}
 		value := env.Value
 		if env.ValueFrom != nil {
-			if env.ValueFrom.FieldRef == nil {
-				return nil, fmt.Errorf("environment variable %q uses an unsupported valueFrom source", env.Name)
-			}
-			resolved, err := downwardAPIValue(pod, managed, m.nodeIP, env.ValueFrom.FieldRef.FieldPath)
+			resolved, err := m.resolveEnvValue(ctx, pod, managed, env)
 			if err != nil {
-				return nil, fmt.Errorf("environment variable %q: %w", env.Name, err)
+				return nil, err
 			}
 			value = resolved
 		}
@@ -90,6 +87,54 @@ func (m *workloadManager) resolveContainerEnvironment(ctx context.Context, pod P
 		result = append(result, key+"="+values[key])
 	}
 	return result, nil
+}
+
+// resolveEnvValue resolves one env[].valueFrom. Kubernetes allows SecretKeyRef,
+// ConfigMapKeyRef, FieldRef and ResourceFieldRef. Resource quantities have no
+// meaning for a Macker workload on this node, so they stay an explicit error
+// instead of silently resolving to an empty value.
+func (m *workloadManager) resolveEnvValue(ctx context.Context, pod Pod, managed *managedWorkload, env EnvVar) (string, error) {
+	source := env.ValueFrom
+	switch {
+	case source.FieldRef != nil:
+		resolved, err := downwardAPIValue(pod, managed, m.nodeIP, source.FieldRef.FieldPath)
+		if err != nil {
+			return "", fmt.Errorf("environment variable %q: %w", env.Name, err)
+		}
+		return resolved, nil
+	case source.SecretKeyRef != nil:
+		selector := source.SecretKeyRef
+		secret, found, err := m.getSecret(ctx, pod.ObjectMeta.Namespace, selector.Name, selector.Optional != nil && *selector.Optional)
+		if err != nil {
+			return "", fmt.Errorf("environment variable %q: valueFrom Secret %q: %w", env.Name, selector.Name, err)
+		}
+		if !found {
+			return "", nil
+		}
+		value, ok := secret.Data[selector.Key]
+		if !ok {
+			return "", fmt.Errorf("environment variable %q: Secret %q has no key %q", env.Name, selector.Name, selector.Key)
+		}
+		return string(value), nil
+	case source.ConfigMapKeyRef != nil:
+		selector := source.ConfigMapKeyRef
+		configMap, found, err := m.getConfigMap(ctx, pod.ObjectMeta.Namespace, selector.Name, selector.Optional != nil && *selector.Optional)
+		if err != nil {
+			return "", fmt.Errorf("environment variable %q: valueFrom ConfigMap %q: %w", env.Name, selector.Name, err)
+		}
+		if !found {
+			return "", nil
+		}
+		value, ok := configMap.Data[selector.Key]
+		if !ok {
+			return "", fmt.Errorf("environment variable %q: ConfigMap %q has no key %q", env.Name, selector.Name, selector.Key)
+		}
+		return value, nil
+	case source.ResourceFieldRef != nil:
+		return "", fmt.Errorf("environment variable %q uses an unsupported valueFrom source (resourceFieldRef)", env.Name)
+	default:
+		return "", fmt.Errorf("environment variable %q uses an unsupported valueFrom source", env.Name)
+	}
 }
 
 func (m *workloadManager) getConfigMap(ctx context.Context, namespace, name string, optional bool) (ConfigMap, bool, error) {

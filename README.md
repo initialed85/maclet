@@ -388,7 +388,7 @@ per-Pod state directories and support `items`, `defaultMode`, `binaryData`, and
 optional missing ConfigMaps. Macker cannot enforce read-only mounts, so
 hostPath `readOnly` and `subPathExpr` mounts are rejected; ConfigMap read-only
 mounts are accepted but remain trusted writable copies. Multiple containers,
-unsupported volume sources, unsupported `valueFrom` sources, and `hostPort`
+unsupported volume sources, `valueFrom: resourceFieldRef`, and `hostPort`
 mappings are also rejected. An absolute `workingDir` is passed to Macker and
 overrides the image working directory. `hostNetwork: true` is supported with
 `dnsPolicy: ClusterFirstWithHostNet`; it uses Macker host networking, reports
@@ -396,7 +396,10 @@ the node IP as both PodIP and HostIP, and does not allocate a PodCIDR alias.
 Other host-network DNS policies remain Pending. `envFrom` supports ConfigMap and Secret references only through an explicitly
 configured, authorized peer kubeconfig; the token-backed
 `system:k3s-controller` identity is not assumed to read storage/configuration
-objects. Downward-API `fieldRef` supports Pod identity, node/IP, labels, and
+objects. `env[].valueFrom` resolves `secretKeyRef` and `configMapKeyRef` through
+that same authorized peer client, honouring `optional`; a reference that exists
+but lacks the named key is an error rather than an empty value. Downward-API
+`fieldRef` supports Pod identity, node/IP, labels, and
 annotations. Missing required references, API 403s, absent peer credentials,
 and unsupported field sources remain Pending with actionable
 `--peer-kubeconfig` guidance. Generic NFS PVC wiring is now present behind the
