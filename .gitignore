@@ -5,3 +5,6 @@ bin/
 coverage.out
 .DS_Store
 /dist/
+/.build/
+/build-tags.txt
+/build-number.txt
