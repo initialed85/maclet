@@ -107,8 +107,10 @@ retry attempt counter before a later reacquisition. Jitter is intentionally
 omitted until retry behavior is operationally validated. Once local runtime is
 established, transient API failures retain workloads, aliases/routes, VXLAN,
 and kubelet HTTPS while status, Lease, Pod-list, DNS, and peer reconciliation
-retry on later heartbeats. `--once` bypasses the outer supervisor and remains a
-single strict pass.
+retry on later heartbeats. Status and Lease renewal run on their own five-second
+clock with a round deadline, because the cluster's node monitor grace period is
+what turns a delayed heartbeat into `NotReady` and eviction. `--once` bypasses the
+outer supervisor and remains a single strict pass.
 
 ### `darwin-vxlan`
 
@@ -193,7 +195,9 @@ Pod-delete permission.
     file when resolver integration is enabled.
 11. Start the kubelet HTTPS endpoint and one remotedialer tunnel per discovered
     K3s API server.
-12. Begin the ten-second Node/Lease/Pod/network reconciliation loop.
+12. Begin the five-second Node status/Lease renewal loop and the ten-second
+    Pod/network reconciliation loop, and hold the macOS idle and system-sleep
+    power assertions until the session ends.
 
 A subsequent join must reuse the original state directory. K3s stores only a
 hash of the node password, so deleting local state without deleting the

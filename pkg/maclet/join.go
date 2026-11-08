@@ -18,6 +18,17 @@ func runJoinSession(ctx context.Context, cfg JoinConfig) error {
 	if err != nil {
 		return err
 	}
+	// A sleeping Mac cannot pong its remotedialer tunnel, cannot post Node status, and
+	// cannot renew its Lease, so the control plane marks it NotReady and evicts what runs
+	// on it. Ask macOS not to system-sleep for as long as this session is joined.
+	if !cfg.Once && cfg.KeepAwake {
+		awake, awakeErr := startKeepAwake(ctx)
+		if awakeErr != nil {
+			log.Printf("warning: %v", awakeErr)
+		} else if awake != nil {
+			defer awake.Close()
+		}
+	}
 	if cfg.NodeName == "" {
 		cfg.NodeName = state.NodeName
 	}
@@ -267,6 +278,13 @@ func runJoinSession(ctx context.Context, cfg JoinConfig) error {
 	if updatedNode != nil {
 		node = updatedNode
 	}
+	// Status and Lease liveness get a clock of their own so the slower reconciles below
+	// cannot delay them into the cluster's node monitor grace period.
+	var heart *nodeHeartbeat
+	if !cfg.Once {
+		heart = startNodeHeartbeat(ctx, client, node, state.NodeIP, cfg.ExternalIP)
+		defer heart.Close()
+	}
 	if !cfg.Once && workloads != nil {
 		if pods, listErr := listAssignedPods(ctx, client, state.NodeName); listErr != nil {
 			log.Printf("warning: list assigned workloads: %v", listErr)
@@ -288,6 +306,12 @@ func runJoinSession(ctx context.Context, cfg JoinConfig) error {
 	for {
 		select {
 		case <-ctx.Done():
+			// Stop renewing before cordoning: the cordon and the status patch act on the
+			// same object, and the newest view is the one the heartbeat last saw.
+			if heart != nil {
+				heart.Close()
+				node = heart.Node()
+			}
 			drainContext, cancel := context.WithTimeout(context.Background(), cfg.DrainTimeout)
 			if node != nil {
 				if drainedNode, drainErr := setNodeShutdownCordon(drainContext, client, node, true); drainErr != nil {
@@ -325,13 +349,6 @@ func runJoinSession(ctx context.Context, cfg JoinConfig) error {
 				} else if updateErr := darwinNetwork.setGatewayMAC(gatewayMAC); updateErr != nil {
 					log.Printf("warning: update Flannel gateway MAC: %v", updateErr)
 				}
-			}
-			updatedNode, controlPlaneErr := reconcileNodeAndLease(ctx, client, node, state.NodeIP, cfg.ExternalIP)
-			if updatedNode != nil {
-				node = updatedNode
-			}
-			if controlPlaneErr != nil {
-				log.Printf("warning: control-plane reconciliation deferred: %v; retaining local runtime", controlPlaneErr)
 			}
 			if workloads != nil {
 				if pods, listErr := listAssignedPods(ctx, client, state.NodeName); listErr != nil {

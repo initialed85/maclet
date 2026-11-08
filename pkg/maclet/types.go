@@ -49,6 +49,7 @@ type JoinConfig struct {
 	VXLANGatewayMAC        string
 	PeerKubeconfig         string
 	PeerContext            string
+	KeepAwake              bool
 	DrainTimeout           time.Duration
 	NativeLogTTL           time.Duration
 	VXLANPort              int

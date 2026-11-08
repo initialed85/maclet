@@ -170,13 +170,24 @@ existing node name cannot generate a replacement password. If the state is
 lost, delete the Node and its `kube-system/<node>.node-password.k3s` Secret
 before joining that name again.
 
-The daemon refreshes Node status and the Lease every 10 seconds. A state-dir
+The daemon publishes Node status and renews the Lease every 5 seconds on a clock
+of its own, bounded by a 4-second round deadline, so a slow peer lookup, Pod list
+or workload reconcile on the 10-second heartbeat cannot delay liveness past a
+cluster's node monitor grace period. A state-dir
 advisory lock prevents two maclet joins from racing the same Node and native
 runtime. Normal joins retry transient bootstrap/control-plane failures with
 bounded backoff and retain established local workloads and networking while
 the API is unavailable; `--once` remains a single strict pass. Stop a normal
 join with `Ctrl-C`; the Node remains in the cluster and will eventually become
 `NotReady` until maclet is started again, as with a normal node agent.
+
+While joined, maclet holds the macOS idle and system-sleep power assertions
+(`caffeinate -is`) for as long as the session runs, because a sleeping Mac cannot
+pong its remotedialer tunnel, cannot post status, and cannot renew its Lease - the
+cluster marks the Node `NotReady` and evicts what was running on it. The system-sleep
+half only applies on AC power, so a Mac carried away on battery still sleeps; pass
+`--keep-awake=false` to leave the host's power policy alone and accept the resulting
+`NotReady` periods.
 
 Inspect the resulting object with:
 

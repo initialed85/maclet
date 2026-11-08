@@ -77,6 +77,7 @@ func runJoinCommand(args []string) error {
 	flags.StringVar(&cfg.VXLANGatewayMAC, "vxlan-gateway-mac", "", "static remote flannel.1 MAC override (normally discovered through the K3s controller client)")
 	flags.StringVar(&cfg.PeerKubeconfig, "peer-kubeconfig", "", "explicitly authorized kubeconfig for peer discovery, storage/config reads, and privileged cleanup")
 	flags.StringVar(&cfg.PeerContext, "peer-context", "", "kubeconfig context used for peer discovery (defaults to the current context)")
+	flags.BoolVar(&cfg.KeepAwake, "keep-awake", true, "hold the macOS idle and system sleep assertions while joined, so the Node keeps its tunnel and its Lease (set false to let the Mac sleep and accept NotReady periods)")
 	flags.IntVar(&cfg.VXLANPort, "vxlan-port", defaultVXLANPort, "VXLAN UDP port")
 	flags.IntVar(&cfg.VXLANMTU, "vxlan-mtu", defaultVXLANMTU, "VXLAN bridge MTU")
 	flags.StringVar(&cfg.ClusterCIDR, "cluster-cidr", defaultClusterCIDR, "cluster Pod network CIDR routed through the Darwin VXLAN")
