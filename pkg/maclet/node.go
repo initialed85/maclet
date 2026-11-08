@@ -294,26 +294,33 @@ func updateNodeStatusWithFullPut(ctx context.Context, client *APIClient, node *N
 	return nil, errors.New("status update retry limit exceeded")
 }
 
+// ensureLease renews this Node's Lease in kube-node-lease.
+//
+// Each renewal carries a freshly allocated timestamp. metav1.MicroTime is a plain struct and
+// json.Unmarshal decodes through the pointers the object already holds, so a single `now`
+// shared with the decoded Lease is overwritten by the stored renewTime before it is assigned
+// back: every "renewal" then PUTs the timestamp it just read, the Lease never advances, and
+// the API server dedupes the identical write so the failure is invisible in the logs.
 func ensureLease(ctx context.Context, client *APIClient, nodeName string) error {
 	path := "/apis/coordination.k8s.io/v1/namespaces/kube-node-lease/leases/" + url.PathEscape(nodeName)
-	now := metav1.MicroTime{Time: time.Now().UTC()}
+	renewTime := metav1.MicroTime{Time: time.Now().UTC()}
 	holderIdentity := nodeName
 	leaseDuration := int32(defaultLeaseDurationSecs)
 	body, err := client.Get(ctx, path)
-	lease := Lease{
-		TypeMeta:   metav1.TypeMeta{APIVersion: "coordination.k8s.io/v1", Kind: "Lease"},
-		ObjectMeta: ObjectMeta{Name: nodeName, Namespace: "kube-node-lease"},
-		Spec: LeaseSpec{
-			HolderIdentity:       &holderIdentity,
-			LeaseDurationSeconds: &leaseDuration,
-			AcquireTime:          &now,
-			RenewTime:            &now,
-		},
-	}
 	if err != nil {
 		var apiErr *HTTPError
 		if !errors.As(err, &apiErr) || apiErr.Code != http.StatusNotFound {
 			return err
+		}
+		lease := Lease{
+			TypeMeta:   metav1.TypeMeta{APIVersion: "coordination.k8s.io/v1", Kind: "Lease"},
+			ObjectMeta: ObjectMeta{Name: nodeName, Namespace: "kube-node-lease"},
+			Spec: LeaseSpec{
+				HolderIdentity:       &holderIdentity,
+				LeaseDurationSeconds: &leaseDuration,
+				AcquireTime:          &renewTime,
+				RenewTime:            &renewTime,
+			},
 		}
 		if _, err := client.PostJSON(ctx, "/apis/coordination.k8s.io/v1/namespaces/kube-node-lease/leases", lease); err != nil {
 			var conflict *HTTPError
@@ -324,12 +331,16 @@ func ensureLease(ctx context.Context, client *APIClient, nodeName string) error 
 		}
 		return nil
 	}
+	var lease Lease
 	if err := json.Unmarshal(body, &lease); err != nil {
 		return fmt.Errorf("decode node Lease: %w", err)
 	}
 	lease.Spec.HolderIdentity = &holderIdentity
 	lease.Spec.LeaseDurationSeconds = &leaseDuration
-	lease.Spec.RenewTime = &now
+	lease.Spec.RenewTime = &renewTime
+	if lease.Spec.AcquireTime == nil {
+		lease.Spec.AcquireTime = &renewTime
+	}
 	if _, err := client.PutJSON(ctx, path, lease); err != nil {
 		return fmt.Errorf("renew node Lease: %w", err)
 	}
