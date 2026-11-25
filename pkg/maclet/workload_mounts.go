@@ -138,7 +138,17 @@ func resolveVolumeSubPath(hostPath, subPath string) (string, error) {
 	return target, nil
 }
 
-func mackerVolumeArgs(pod Pod, container ContainerSpec) ([]string, error) {
+// mackerReadOnlyVolumeMarker is the text Macker's own usage output must contain
+// for maclet to send a third `ro` field in -v. Macker maps volumes with a live
+// host symlink, so `:ro` is only accepted by binaries that can enforce it, and
+// maclet never sends it to one that cannot.
+const mackerReadOnlyVolumeMarker = "HOST:CONTAINER[:ro]"
+
+func mackerHelpAdvertisesReadOnlyVolumes(help string) bool {
+	return strings.Contains(help, mackerReadOnlyVolumeMarker)
+}
+
+func mackerVolumeArgs(pod Pod, container ContainerSpec, readOnlySupported bool) ([]string, error) {
 	volumes := make(map[string]string, len(pod.Spec.Volumes))
 	volumeTypes := make(map[string]string, len(pod.Spec.Volumes))
 	for _, volume := range pod.Spec.Volumes {
@@ -183,7 +193,9 @@ func mackerVolumeArgs(pod Pod, container ContainerSpec) ([]string, error) {
 		}
 		seenMountPaths[mountPath] = struct{}{}
 		if mount.ReadOnly {
-			return nil, fmt.Errorf("volume mount %q requests readOnly, but Macker hostPath volumes are writable live symlinks", mountPath)
+			if !readOnlySupported {
+				return nil, fmt.Errorf("volume mount %q requests readOnly, but this Macker binary does not advertise %q, so its hostPath volumes stay writable live symlinks; upgrade Macker or drop readOnly (see KUBERNETES-PARITY.md)", mountPath, mackerReadOnlyVolumeMarker)
+			}
 		}
 		if mount.SubPathExpr != "" {
 			return nil, fmt.Errorf("volume mount %q uses subPathExpr, which maclet does not support", mountPath)
@@ -202,7 +214,12 @@ func mackerVolumeArgs(pod Pod, container ContainerSpec) ([]string, error) {
 		if strings.Contains(resolvedPath, ":") || strings.Contains(mountPath, ":") {
 			return nil, fmt.Errorf("volume mount %q cannot be passed to Macker because its path contains ':'", mountPath)
 		}
-		args = append(args, "-v", resolvedPath+":"+mountPath)
+
+		spec := resolvedPath + ":" + mountPath
+		if mount.ReadOnly {
+			spec += ":ro"
+		}
+		args = append(args, "-v", spec)
 	}
 	return args, nil
 }

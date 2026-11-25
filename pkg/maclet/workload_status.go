@@ -183,6 +183,29 @@ func podHasNativeLabel(pod Pod) bool {
 	return pod.ObjectMeta.Labels[nativeWorkloadLabelKey] == nativeWorkloadLabelValue
 }
 
+const (
+	// unlabelledPendingReason and unlabelledPendingMessage explain a Pod that a
+	// scheduler placed on a maclet node but maclet will never run. Kubernetes
+	// has no canonical reason for "this node agent ignores you", and silence is
+	// how a portable manifest becomes an indefinitely Pending Pod, so maclet
+	// states the deviation on the Pod instead of leaving it undiscoverable.
+	unlabelledPendingReason  = "MacletMissingNativeLabel"
+	unlabelledPendingMessage = "maclet only supervises Pods labelled " + nativeWorkloadLabelKey + "=" + nativeWorkloadLabelValue + "; add that label, or schedule this Pod on a Linux node (see KUBERNETES-PARITY.md)"
+)
+
+// explainUnlabelledPod reports why an unlabelled Pod stays Pending. It writes
+// only while the explanation is missing, because maclet reconciles every few
+// seconds and an unlabelled Pod must not become API-server churn.
+func (m *workloadManager) explainUnlabelledPod(ctx context.Context, client *APIClient, pod *Pod) {
+	if phase := string(pod.Status.Phase); phase != "" && phase != "Pending" {
+		return
+	}
+	if pod.Status.Message == unlabelledPendingMessage {
+		return
+	}
+	_ = m.updateStatus(ctx, client, pod, "Pending", pod.Status.PodIP, unlabelledPendingReason, unlabelledPendingMessage, false, 0)
+}
+
 func (m *workloadManager) updateStatus(ctx context.Context, client *APIClient, pod *Pod, phase, ip, reason, message string, running bool, restartCount int32, termination ...*mackerInspection) error {
 	desired := desiredPodStatus(*pod, m.nodeIP, phase, ip, reason, message, running, restartCount, termination...)
 	updated, err := updatePodStatus(ctx, client, pod, desired)

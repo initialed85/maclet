@@ -141,6 +141,7 @@ func (m *workloadManager) reconcile(ctx context.Context, client *APIClient, pods
 			continue
 		}
 		if !podHasNativeLabel(*pod) {
+			m.explainUnlabelledPod(ctx, client, pod)
 			continue
 		}
 		seen[uid] = true

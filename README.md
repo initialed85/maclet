@@ -36,6 +36,13 @@ label: k8s-darwin.dev/native=true
 taint: k8s-darwin.dev/native=true:NoSchedule
 ```
 
+Tolerating the taint is not enough to be run here: maclet only supervises Pods
+labelled `k8s-darwin.dev/native=true`. A Pod that reaches the node without that
+label is reported `Pending` with reason `MacletMissingNativeLabel` and a message
+naming the label, so the deviation is visible on the Pod instead of being an
+unexplained hang. `KUBERNETES-PARITY.md` is the full contract for this node
+class.
+
 ## Build
 
 ```sh
@@ -396,9 +403,14 @@ file content, use a `Directory` hostPath plus `subPath` and mount the file at
 its full destination (for example, `/usr/share/nginx/html/index.html`), or use
 a `File` hostPath without `subPath`. ConfigMap volumes are materialized into
 per-Pod state directories and support `items`, `defaultMode`, `binaryData`, and
-optional missing ConfigMaps. Macker cannot enforce read-only mounts, so
-hostPath `readOnly` and `subPathExpr` mounts are rejected; ConfigMap read-only
-mounts are accepted but remain trusted writable copies. Multiple containers,
+optional missing ConfigMaps. `readOnly` hostPath mounts are negotiated with the runtime: maclet probes
+whether the installed Macker advertises `HOST:CONTAINER[:ro]` (a negative answer
+is re-probed after 5 minutes, so a Macker upgrade heals a joined node) and then
+passes `readOnly` through as `:ro`. Against a Macker that cannot enforce it, a
+`readOnly` hostPath mount and any `subPathExpr` mount are rejected rather than
+silently run writable; ConfigMap read-only mounts are accepted and stay trusted
+writable copies until `:ro` is available. See `KUBERNETES-PARITY.md` for the
+full list of what a maclet node guarantees and what it knowingly does differently. Multiple containers,
 unsupported volume sources, `valueFrom: resourceFieldRef`, and `hostPort`
 mappings are also rejected. An absolute `workingDir` is passed to Macker and
 overrides the image working directory. `hostNetwork: true` is supported with
@@ -422,7 +434,8 @@ flags are used for this gateway path only. Direct CSI NFS options are not
 rewritten. This remains experimental
 until a real macOS NFS server read/write mount test succeeds. Mounts are
 host-visible, lifecycle is sudo-owned, and Macker cannot enforce read-only
-semantics on its symlink-backed mapping; ambiguous PV data, unsafe
+semantics on its symlink-backed mapping (a PVC's own `readOnly` is enforced by
+the host mount instead); ambiguous PV data, unsafe
 paths/options, and Longhorn RWO/block PVs remain Pending. With a recent Macker, maclet records the actual exit code and
 termination timestamps in the Kubernetes container status; older Macker
 binaries retain the previous status-only fallback. Supply `--macker-binary` to

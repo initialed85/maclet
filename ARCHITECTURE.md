@@ -286,7 +286,12 @@ sudo-owned helper, and pass the mount (plus contained subPath) through the
 same mapping. NFS mounts are host-visible and Macker cannot enforce read-only
 semantics on the symlink mapping; lifecycle ownership is journaled so restart
 cleanup only unmounts paths maclet owns. The materialized files are writable
-copies because Macker cannot enforce read-only mounts. Every reconciliation pass:
+copies unless the runtime advertises read-only volumes: maclet probes the
+installed Macker for the `HOST:CONTAINER[:ro]` usage marker and only then asks
+for a read-only mapping, refusing a `readOnly` hostPath mount it cannot enforce
+rather than running it writable. `KUBERNETES-PARITY.md` states the node's
+contract for every core Pod field, including the deviations that fail closed and
+the ones that are simply absent on a trusted-native node. Every reconciliation pass:
 
 1. lists Pods assigned to the registered Node;
 2. handles deletion and terminal lifecycle state;

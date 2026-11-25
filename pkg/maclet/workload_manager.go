@@ -97,6 +97,44 @@ type workloadManager struct {
 	isMountpoint func(string, nfsMountSpec) (bool, error)
 	debug        bool
 	mu           sync.RWMutex
+	// readOnlyVolumes caches what the installed Macker binary can enforce, so a
+	// Pod asking for readOnly does not re-probe on every reconciliation pass.
+	readOnlyVolumes         *bool
+	readOnlyVolumesProbedAt time.Time
+	capabilityMu            sync.Mutex
+}
+
+// mackerReadOnlyVolumeRetry is how long a negative capability answer is trusted.
+// It exists so a Macker upgrade is picked up without restarting maclet.
+const mackerReadOnlyVolumeRetry = 5 * time.Minute
+
+// mackerHelpOutput returns the combined output of a Macker usage command. Usage
+// commands exit non-zero by design, so their error is not interesting here.
+func (m *workloadManager) mackerHelpOutput(args ...string) []byte {
+	command, err := m.mackerCommand(args...)
+	if err != nil {
+		return nil
+	}
+	output, _ := command.CombinedOutput()
+	return output
+}
+
+// supportsReadOnlyVolumes reports whether the Macker binary can enforce a
+// read-only -v mount. The answer is cached; a negative answer is retried after
+// mackerReadOnlyVolumeRetry so upgrading Macker heals an already-joined node.
+func (m *workloadManager) supportsReadOnlyVolumes() bool {
+	m.capabilityMu.Lock()
+	defer m.capabilityMu.Unlock()
+	if m.readOnlyVolumes != nil && (*m.readOnlyVolumes || time.Since(m.readOnlyVolumesProbedAt) < mackerReadOnlyVolumeRetry) {
+		return *m.readOnlyVolumes
+	}
+	supported := mackerHelpAdvertisesReadOnlyVolumes(string(m.mackerHelpOutput("run", "--help")))
+	if m.debug {
+		log.Printf("debug: Macker read-only volume support detected: %t", supported)
+	}
+	m.readOnlyVolumes = &supported
+	m.readOnlyVolumesProbedAt = time.Now()
+	return supported
 }
 
 func newWorkloadManager(network *DarwinNetworkHandle, mackerBinary, nodeIP string) *workloadManager {

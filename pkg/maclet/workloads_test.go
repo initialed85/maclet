@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -232,7 +233,7 @@ func TestMackerVolumeArgs(t *testing.T) {
 		{Name: "content", MountPath: "/usr/share/nginx/html/index.html", SubPath: "index.html"},
 		{Name: "config", MountPath: "/etc/example/config.txt"},
 	}}
-	args, err := mackerVolumeArgs(pod, container)
+	args, err := mackerVolumeArgs(pod, container, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -250,21 +251,21 @@ func TestMackerVolumeArgsRejectsUnsupportedMounts(t *testing.T) {
 	}
 	if _, err := mackerVolumeArgs(Pod{Spec: PodSpec{Volumes: []Volume{
 		testHostPathVolume("existing", existing, "Directory"),
-	}}}, ContainerSpec{VolumeMounts: []VolumeMount{{Name: "existing", MountPath: "/data", ReadOnly: true}}}); err == nil || !strings.Contains(err.Error(), "readOnly") {
+	}}}, ContainerSpec{VolumeMounts: []VolumeMount{{Name: "existing", MountPath: "/data", ReadOnly: true}}}, false); err == nil || !strings.Contains(err.Error(), "readOnly") {
 		t.Fatalf("readOnly mount error = %v, want readOnly rejection", err)
 	}
-	if _, err := mackerVolumeArgs(Pod{Spec: PodSpec{Volumes: []Volume{{Name: "projected"}}}}, ContainerSpec{VolumeMounts: []VolumeMount{{Name: "projected", MountPath: "/data"}}}); err == nil || !strings.Contains(err.Error(), "supported hostPath") {
+	if _, err := mackerVolumeArgs(Pod{Spec: PodSpec{Volumes: []Volume{{Name: "projected"}}}}, ContainerSpec{VolumeMounts: []VolumeMount{{Name: "projected", MountPath: "/data"}}}, false); err == nil || !strings.Contains(err.Error(), "supported hostPath") {
 		t.Fatalf("non-hostPath mount error = %v, want unsupported hostPath error", err)
 	}
 	if _, err := mackerVolumeArgs(Pod{Spec: PodSpec{Volumes: []Volume{
 		testHostPathVolume("existing", existing, "Directory"),
-	}}}, ContainerSpec{VolumeMounts: []VolumeMount{{Name: "existing", MountPath: "/data", SubPathExpr: "$(POD_NAME)"}}}); err == nil || !strings.Contains(err.Error(), "subPathExpr") {
+	}}}, ContainerSpec{VolumeMounts: []VolumeMount{{Name: "existing", MountPath: "/data", SubPathExpr: "$(POD_NAME)"}}}, false); err == nil || !strings.Contains(err.Error(), "subPathExpr") {
 		t.Fatalf("subPathExpr mount error = %v, want subPathExpr rejection", err)
 	}
 	missing := filepath.Join(root, "created", "directory")
 	if _, err := mackerVolumeArgs(Pod{Spec: PodSpec{Volumes: []Volume{
 		testHostPathVolume("created", missing, "DirectoryOrCreate"),
-	}}}, ContainerSpec{VolumeMounts: []VolumeMount{{Name: "created", MountPath: "/data"}}}); err != nil {
+	}}}, ContainerSpec{VolumeMounts: []VolumeMount{{Name: "created", MountPath: "/data"}}}, false); err != nil {
 		t.Fatal(err)
 	}
 	if info, err := os.Stat(missing); err != nil || !info.IsDir() {
@@ -289,9 +290,66 @@ func TestMackerVolumeArgsRejectsSubPathEscape(t *testing.T) {
 		t.Fatal(err)
 	}
 	pod := Pod{Spec: PodSpec{Volumes: []Volume{testHostPathVolume("volume", volumeRoot, "Directory")}}}
-	_, err := mackerVolumeArgs(pod, ContainerSpec{VolumeMounts: []VolumeMount{{Name: "volume", MountPath: "/data", SubPath: "escape/secret"}}})
+	_, err := mackerVolumeArgs(pod, ContainerSpec{VolumeMounts: []VolumeMount{{Name: "volume", MountPath: "/data", SubPath: "escape/secret"}}}, false)
 	if err == nil || !strings.Contains(err.Error(), "escapes") {
 		t.Fatalf("subPath escape error = %v", err)
+	}
+}
+
+func TestMackerVolumeArgsPassesReadOnlyWhenMackerSupportsIt(t *testing.T) {
+	root := t.TempDir()
+	volume := filepath.Join(root, "secrets")
+	if err := os.Mkdir(volume, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	pod := Pod{Spec: PodSpec{Volumes: []Volume{testHostPathVolume("data", volume, "Directory")}}}
+	container := ContainerSpec{VolumeMounts: []VolumeMount{
+		{Name: "data", MountPath: "/data", ReadOnly: true},
+		{Name: "data", MountPath: "/rw"},
+	}}
+	args, err := mackerVolumeArgs(pod, container, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"-v", volume + ":/data:ro", "-v", volume + ":/rw"}
+	if got := strings.Join(args, "\x00"); got != strings.Join(want, "\x00") {
+		t.Fatalf("mackerVolumeArgs(readOnly supported) = %#v, want %#v", args, want)
+	}
+}
+
+func TestMackerReadOnlyVolumeCapabilityProbe(t *testing.T) {
+	help := "  -v value\n    \thost path and container path, HOST:CONTAINER[:ro] (repeatable)\n"
+	if !mackerHelpAdvertisesReadOnlyVolumes(help) {
+		t.Fatal("read-only volume marker was not detected in Macker usage")
+	}
+	if mackerHelpAdvertisesReadOnlyVolumes("  -v value\n    \thost path and container path, HOST:CONTAINER (repeatable)\n") {
+		t.Fatal("the writable-only usage must not look like read-only support")
+	}
+	root := t.TempDir()
+	supported := filepath.Join(root, "macker-ro")
+	unsupported := filepath.Join(root, "macker-plain")
+	for path, usage := range map[string]string{supported: help, unsupported: "HOST:CONTAINER (repeatable)"} {
+		script := "#!/bin/sh\necho '  -v value'\necho '" + strings.ReplaceAll(usage, "'", "'\\''") + "'\nexit 2\n"
+		if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if manager := newWorkloadManager(nil, supported, ""); !manager.supportsReadOnlyVolumes() {
+		t.Fatal("supportsReadOnlyVolumes() = false for a Macker that advertises [:ro]")
+	}
+	manager := newWorkloadManager(nil, unsupported, "")
+	if manager.supportsReadOnlyVolumes() {
+		t.Fatal("supportsReadOnlyVolumes() = true for a Macker that does not advertise [:ro]")
+	}
+	// A negative answer is retried, because upgrading Macker must heal a node
+	// that already probed the old binary.
+	manager.mackerBinary = supported
+	if manager.supportsReadOnlyVolumes() {
+		t.Fatal("supportsReadOnlyVolumes() = false immediately after a negative probe")
+	}
+	manager.readOnlyVolumesProbedAt = time.Now().Add(-2 * mackerReadOnlyVolumeRetry)
+	if !manager.supportsReadOnlyVolumes() {
+		t.Fatal("supportsReadOnlyVolumes() did not re-probe an expired negative answer")
 	}
 }
 
@@ -395,5 +453,57 @@ func TestUpdatePodStatusPreservesMetadata(t *testing.T) {
 	}
 	if updated.ObjectMeta.ResourceVersion != "7" || updated.Status.PodIP != "10.42.8.3" {
 		t.Fatalf("updated Pod = %#v", updated)
+	}
+}
+
+func TestExplainUnlabelledPodReportsOnce(t *testing.T) {
+	var writes int32
+	server := httptest.NewTLSServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodPut || request.URL.Path != "/api/v1/namespaces/default/pods/web/status" {
+			t.Fatalf("request = %s %s", request.Method, request.URL.Path)
+		}
+		atomic.AddInt32(&writes, 1)
+		var payload struct {
+			Metadata ObjectMeta `json:"metadata"`
+			Status   PodStatus  `json:"status"`
+		}
+		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		response.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(response).Encode(Pod{ObjectMeta: payload.Metadata, Status: payload.Status})
+	}))
+	defer server.Close()
+	client, err := newAPIClient(server.URL, nil, "", "", true, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := newWorkloadManager(nil, "", "192.168.137.111")
+	pod := &Pod{
+		ObjectMeta: ObjectMeta{Name: "web", Namespace: "default", UID: "uid-1", ResourceVersion: "7"},
+		Spec:       PodSpec{Containers: []ContainerSpec{{Name: "web", Image: "example/web:latest"}}},
+		Status:     PodStatus{Phase: "Pending"},
+	}
+	manager.explainUnlabelledPod(context.Background(), client, pod)
+	if got := atomic.LoadInt32(&writes); got != 1 {
+		t.Fatalf("status writes = %d, want 1", got)
+	}
+	if pod.Status.Message != unlabelledPendingMessage || string(pod.Status.Phase) != "Pending" {
+		t.Fatalf("unlabelled Pod status = %q/%q", pod.Status.Phase, pod.Status.Message)
+	}
+	// maclet reconciles every few seconds, so an explained Pod must not churn.
+	manager.explainUnlabelledPod(context.Background(), client, pod)
+	if got := atomic.LoadInt32(&writes); got != 1 {
+		t.Fatalf("status writes after re-explaining = %d, want 1", got)
+	}
+	// A Pod maclet never ran is not rewritten into Pending.
+	terminal := &Pod{
+		ObjectMeta: ObjectMeta{Name: "web", Namespace: "default", UID: "uid-2", ResourceVersion: "8"},
+		Spec:       PodSpec{Containers: []ContainerSpec{{Name: "web", Image: "example/web:latest"}}},
+		Status:     PodStatus{Phase: "Running"},
+	}
+	manager.explainUnlabelledPod(context.Background(), client, terminal)
+	if got := atomic.LoadInt32(&writes); got != 1 {
+		t.Fatalf("status writes for a Running Pod = %d, want 1", got)
 	}
 }

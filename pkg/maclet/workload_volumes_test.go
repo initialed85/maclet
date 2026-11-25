@@ -64,6 +64,30 @@ func TestMackerConfigMapVolumeMaterializesItems(t *testing.T) {
 	}
 }
 
+// A Macker that advertises read-only volumes must be told about a read-only
+// ConfigMap mount instead of maclet quietly running it writable.
+func TestMackerConfigMapVolumeKeepsReadOnlyWhenMackerSupportsIt(t *testing.T) {
+	client := ownershipTestClient(t, http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		_ = json.NewEncoder(response).Encode(ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "settings"}, Data: map[string]string{"app.conf": "port=8080\n"}})
+	}))
+	binary := filepath.Join(t.TempDir(), "macker")
+	script := "#!/bin/sh\necho 'host path and container path, HOST:CONTAINER[:ro] (repeatable)'\nexit 2\n"
+	if err := os.WriteFile(binary, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	manager := newWorkloadManagerWithState(nil, binary, "192.0.2.10", t.TempDir())
+	manager.apiClient = client
+	pod := Pod{ObjectMeta: ObjectMeta{Namespace: "demo", Name: "native", UID: "uid-1"}, Spec: PodSpec{Volumes: []Volume{{Name: "settings", VolumeSource: VolumeSource{ConfigMap: &ConfigMapVolumeSource{LocalObjectReference: LocalObjectReference{Name: "settings"}}}}}}}
+	container := ContainerSpec{VolumeMounts: []VolumeMount{{Name: "settings", MountPath: "/etc/app", ReadOnly: true}}}
+	args, err := manager.mackerVolumeArgsWithContext(context.Background(), pod, container, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(args) != 2 || args[0] != "-v" || !strings.HasSuffix(args[1], ":/etc/app:ro") {
+		t.Fatalf("volume args = %#v, want a :ro suffix", args)
+	}
+}
+
 func TestMackerConfigMapVolumeRejectsMissingRequiredItem(t *testing.T) {
 	client := ownershipTestClient(t, http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		_ = json.NewEncoder(response).Encode(ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "settings"}, Data: map[string]string{"present": "yes"}})
