@@ -262,28 +262,48 @@ wait_one_pending() {
   return 1
 }
 
-# wait_never_ready is the readOnly invariant: the workload is never Ready, and
-# the Pod is not replaced in a storm. The phase itself is whatever the runtime
-# reports for a process that cannot write its own state, so it is not asserted.
+# wait_never_ready is the readOnly invariant, and it is asserted about the Pod that
+# itself asks for readOnly -- not about the Deployment. The earlier form ("no Pod with
+# this app label is Ready") was wrong on a node that refuses :ro mounts: with
+# maxUnavailable=0 and one surge Pod, the *previous* generation stays Ready, and that
+# generation is legitimately writable, so a correct refusal read as "a workload denied
+# write access became Ready". Both node classes satisfy one rule: a Pod whose own spec
+# requests readOnly never becomes Ready. Where the OS enforces it the process starts and
+# its writes fail with EROFS; where it cannot, maclet refuses the Pod at admission and it
+# never runs writable. The phase itself is whatever the runtime reports for a process that
+# cannot write its own state, so it is not asserted.
 wait_never_ready() {
-  local deadline=$((SECONDS + 60))
+  local deadline=$((SECONDS + 60)) rows seen_ro=false seen_refusal=false
   sleep 20
   if (( $(pod_count) > 2 )); then
     echo "read-only volume rollout created a replacement storm" >&2
     "${K[@]}" -n "$NAMESPACE" get pods -o wide || true
     return 1
   fi
-  local ready
-  ready=$("${K[@]}" -n "$NAMESPACE" get pods -l "app=$APP" \
-    -o jsonpath='{range .items[*]}{.status.phase}{"/"}{range .status.conditions[?(@.type=="Ready")]}{.status}{end}{"\n"}{end}' \
-    2>/dev/null | awk '$0 == "Running/True" { count++ } END { print count+0 }')
-  if [[ "$ready" != 0 ]]; then
-    echo "a workload denied write access became Ready; readOnly is not enforced" >&2
+  while (( SECONDS < deadline )); do
+    rows=$("${K[@]}" -n "$NAMESPACE" get pods -l "app=$APP" \
+      -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.status.phase}{" "}{.status.reason}{" "}{.spec.containers[0].volumeMounts[*].readOnly}{" "}{range .status.conditions[?(@.type=="Ready")]}{.status}{end}{"\n"}{end}' \
+      2>/dev/null)
+    while read -r name phase reason ro ready; do
+      [[ -z "$name" || "$ro" != *true* ]] && continue
+      seen_ro=true
+      [[ "$reason" == "MacletUnsupportedPod" ]] && seen_refusal=true
+      if [[ "$ready" == "True" ]]; then
+        echo "Pod $name asked for a readOnly mount and became Ready; readOnly is not enforced on this node" >&2
+        "${K[@]}" -n "$NAMESPACE" get pods -o wide || true
+        return 1
+      fi
+    done <<<"$rows"
+    sleep 3
+  done
+  if [[ "$seen_ro" != "true" ]]; then
+    echo "no Pod carrying the readOnly mount reached the node; the manifest did not apply" >&2
+    "${K[@]}" -n "$NAMESPACE" get pods -o wide || true
     return 1
   fi
-  while (( SECONDS < deadline )); do
-    sleep 2
-  done
+  if [[ "$seen_refusal" == "true" ]]; then
+    echo "readOnly Pod refused at admission, which is correct for a node whose OS cannot enforce it"
+  fi
   return 0
 }
 
@@ -334,10 +354,9 @@ render base three | "${K[@]}" apply -f - >/dev/null
 wait_rollout
 wait_single_ready
 
-# Read-only volume semantics. This stage needs a Macker that advertises
-# HOST:CONTAINER[:ro] and a maclet that passes it through; against an older
-# runtime the first apply below is rejected and the Pod simply stays Pending with
-# the marker named in its message, which is the fail-closed behaviour.
+# Read-only volume semantics. maclet asks the runtime what it can enforce (see
+# KUBERNETES-PARITY.md), so this stage passes on either answer: enforcement, or a refusal
+# at admission. What it must never see is a :ro mount started writable.
 if [[ "$MACLET_TEST_READ_ONLY" == "true" ]]; then
   render writable-run rw-control | "${K[@]}" apply -f - >/dev/null
   wait_rollout
@@ -386,15 +405,38 @@ fi
 # Exercise the same discovery view used while diagnosing the original issue.
 "${K[@]}" -n "$NAMESPACE" get -o wide pod,service
 
-# Deployment teardown must not leave its native Pod in Terminating.
+# Deployment teardown must not leave its native Pod behind. Stated as two bounded
+# facts rather than "the namespace is empty right now", because the API cascade and
+# maclet's acknowledgement are separate clocks: a Pod can exist for a moment after
+# `delete deployment --wait` returns, still without a deletion timestamp, while the
+# ReplicaSet cascade catches up, and that is not a maclet failure. What is one: a Pod
+# that never gets a deletion timestamp, or one that has it and is not removed, because
+# on a darwin node only maclet can finish that deletion.
 "${K[@]}" -n "$NAMESPACE" delete deployment "$APP" --wait=true --timeout=120s >/dev/null
-for _ in $(seq 1 60); do
-  if [[ "$(pod_count)" == 0 ]]; then
+deadline=$((SECONDS + 180))
+acked_seen=false
+last_unacked=""
+while (( SECONDS < deadline )); do  rows=$("${K[@]}" -n "$NAMESPACE" get pods -o jsonpath='{range .items[*]}{.metadata.name}{"|"}{.metadata.deletionTimestamp}{"\n"}{end}' 2>/dev/null)
+  if [[ -z "${rows//[$'\n']/}" ]]; then
     echo "native workload lifecycle test passed ($NAMESPACE)"
     exit 0
   fi
-  sleep 2
+  unacked=""
+  while IFS='|' read -r name deleted_at; do
+    [[ -z "$name" ]] && continue
+    if [[ -n "$deleted_at" ]]; then
+      acked_seen=true
+    else
+      unacked="$unacked $name"
+    fi
+  done <<<"$rows"
+  last_unacked="$unacked"
+  sleep 3
 done
 "${K[@]}" -n "$NAMESPACE" get pods -o wide || true
-echo "deployment teardown left native Pods behind" >&2
+if [[ "$acked_seen" == "true" ]]; then
+  echo "teardown left a Pod in Terminating: maclet did not acknowledge its deletion within 180s" >&2
+else
+  echo "teardown left Pod(s) without any deletion timestamp:${last_unacked}" >&2
+fi
 exit 1
