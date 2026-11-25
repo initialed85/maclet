@@ -658,7 +658,7 @@ func TestReadOnlyVolumeCapabilityPrefersMackerVolumesVerdict(t *testing.T) {
 	manager := newWorkloadManager(nil, legacy, "")
 	manager.readOnlyPlatform = absentPlatform
 	if manager.supportsReadOnlyVolumes() {
-		t.Fatal("a legacy Macker on a platform without nullfs reported enforceable read-only volumes")
+		t.Fatal("a legacy Macker on a platform that cannot reach nullfs reported enforceable read-only volumes")
 	}
 }
 

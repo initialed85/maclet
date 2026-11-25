@@ -244,8 +244,8 @@ func (m *workloadManager) readOnlyVolumeCapability() (bool, bool, string) {
 		return false, false, fmt.Sprintf("the installed Macker does not accept the %q volume form, so it cannot be asked for a read-only mount; upgrade Macker (the mount lifecycle needs 363dc0c, and the capability probe that would have named the cause here needs 4527b97)", mackerReadOnlyVolumeMarker)
 	}
 	if !m.readOnlyPlatformSupportsMounts() {
-		// A Macker that advertises `:ro` on a macOS without nullfs still accepts the
-		// flag and still fails the mount, so the platform has to be checked before
+		// A Macker that advertises `:ro` on a macOS that cannot reach nullfs still accepts
+		// the flag and still fails the mount, so the platform has to be checked before
 		// promising a Pod its volume will be read-only.
 		return false, false, "this operating system provides no usable read-only bind mount for a hostPath: no mount helper and no null filesystem bundle for the userland route. This kernel does build nullfs, and mount(2) for the registered type name answers EPERM even as root, because nullfs_mount() requires the private entitlement com.apple.private.nullfs_allow with no superuser fallback -- so neither root nor a vendored helper can create the read-only view a readOnly volume asks for."
 	}

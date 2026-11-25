@@ -94,26 +94,46 @@ mount: /private/tmp/mdst failed with 72
 So on that node **no Macker build can enforce a read-only `hostPath` mount**. The userland
 is absent (no `mount_nullfs` anywhere, no `null.fs` bundle for `mount(8)` to exec, which is
 what error 72 reports), and the kernel path is closed behind a door root cannot open. The
-measurement that settles it is macker's, run as root on this same node:
+measurement that settles it is macker's, reproduced independently by maclet on the same node
+with the same call form (libc `mount()`, which is `mount(2)`, `MNT_RDONLY`, mount data
+`/dev/null` and nil on every name):
 
 ```console
-mount(2) syscall 167, four arguments (type, path, flags, data)
-  type "nullfs"     -> EPERM (1)      reproducible; EPERM even with data nil
-  type "null"       -> 19 = ENODEV    identical to a made-up name "bogusxyz"
-  type "devfs"      -> mounts, releases          (calibration control)
-  type apfs|hfs|autofs|lifs -> EINVAL           (bogus-spec control)
+mount(2), four arguments (type, path, flags, data)
+  type "nullfs"     -> EPERM (1)      both data forms; a vfs entry point refusing
+  type "null"       -> 19             identical to a made-up name "bogusfsxyz"
+  type "devfs"      -> mounts, unmounts        (the control that calibrates the probe)
+  type apfs         -> EINVAL with a device spec, EFAULT (14) with "/dev/null"
   type "nfs"        -> 75
 ```
 
+Two measurement traps live in that table, and they are how this question got argued in two
+directions on one node. macOS `strerror(19)` reads *"Operation not supported by device"*, so
+a probe that prints the string instead of the macro reports 19 as though it were `ENOTSUP`;
+the macro for 19 in `<sys/errno.h>` and in xnu's tables is `ENODEV`, and `ENOTSUP` is 45 (Go's
+generated Darwin table agrees: `ENODEV = 0x13`, `ENOTSUP = 0x2d`). A second trap is the
+bogus-spec control: what `apfs` answers depends on the mount data you hand it, so the
+calibration that matters is the name that **succeeds** -- `devfs` mounts read-only and
+unmounts cleanly -- not whatever errno a filesystem you were never going to mount returns.
+Reading `null` alone therefore settles nothing: it is simply not the registered name, and it
+behaves exactly like an invented one.
+
+The instrument is `test-nullfs-name-probe.c` in this repository, so this claim is checkable on
+any darwin node rather than a transcript of one:
+`clang -o nullfs-probe test-nullfs-name-probe.c && sudo ./nullfs-probe /tmp/nullfs-probe null
+nullfs bogusfsxyz apfs devfs`. It takes the probe root and the names to ask, prints errno for
+each name with mount data `/dev/null` and with the data pointer nil, and unmounts everything it
+mounted before it exits -- which matters, because an earlier version of this probe used the
+deprecated `syscall()` shim, that raised SIGSYS partway through on arm64, and it died holding
+a `devfs` mount it had just made.
+
 Two corrections to what this document said before, both mine, and they point the same way.
 The registered name on this OS is `nullfs`, not Linux's `null`, so my `ENODEV` for `null`
-never meant "no such filesystem" -- it meant "no filesystem by that name". And `errno 19` on
-Darwin **is** `ENODEV`; `ENOTSUP` is 45 (Go's generated Darwin table: `ENODEV = 0x13`,
-`ENOTSUP = 0x2d`), which is worth writing down because the pair is easy to invert from Linux,
-and because `EPERM` on the correct name is the result that actually decides this. My earlier
-`sysctl vfs.generic.nullfs` evidence proves nothing either: `vfs.generic` is a tunable
-namespace, not the mount registry -- it lists 119 names and omits `devfs`, which demonstrably
-mounts -- so its absence cannot adjudicate whether a filesystem is registered.
+never meant "no such filesystem" -- it meant "no filesystem by that name", and `EPERM` on the
+correct name is the result that actually decides this. My earlier `sysctl vfs.generic.nullfs`
+evidence proves nothing either: `vfs.generic` is a tunable namespace, not the mount registry --
+it lists 119 names and omits `devfs`, which demonstrably mounts -- so its absence cannot
+adjudicate whether a filesystem is registered.
 
 What the `EPERM` does establish, and it matches Apple's source for `xnu-12377.121.6` (the
 generation matching Darwin 25): `bsd/miscfs/nullfs/` is built into this kernel, and
@@ -176,7 +196,7 @@ not what a Linux reader assumes:
   `sudo -n`; port forwarding is installed by Macker, not maclet. An earlier
   version of this document blamed the service `PATH` for
   lacking `/sbin`; that was wrong, Macker resolves the helper by absolute path
-  first. The real gap is the OS missing nullfs, measured above.
+  first. The real gap is the OS having no reachable nullfs, measured above.
 - The nullfs mount is per mount point inside that container's rootfs and
   **node-wide for the mount's lifetime**. It is not per-process.
 - It is **not a sandbox, and not containment**. The workload is an ordinary
@@ -305,16 +325,18 @@ maclet forwarded `:ro` because the installed Macker advertises the marker, Macke
 could not perform the mount, and the Pod stayed `Pending` — it was never run with
 the sensitive tree writable.
 
-**Conclusion as of 2026-11-25, replacing what this section previously claimed:**
-read-only `hostPath` enforcement is **not achievable on macOS 26 / Darwin 25.6
-arm64**. The OS provides no nullfs — not as a helper, not as a `mount(8)`
-filesystem, not as a kernel feature, and (measured with `mount(2)` directly) not as a
-registered VFS in the release kernel. It is a platform limit, not a build gap, not a
-PATH gap, not a privilege gap, and not something a vendored helper or an entitlement
-overrides. Rolling a newer Macker does not change it. maclet therefore asks the
-runtime what it can enforce, falling back to marker-plus-platform where the runtime
-cannot answer, and a `readOnly: true` `hostPath` mount on a node without nullfs is
-refused at admission:
+**Conclusion as of 2026-11-25, replacing what this section previously claimed:** read-only
+`hostPath` enforcement is **not achievable on macOS 26 / Darwin 25.6 arm64** -- and the reason
+is narrower than "the OS has no nullfs", which is what this section used to say and which the
+`EPERM` disproves. The OS provides no *reachable* nullfs: not as a helper, not as a
+`mount(8)` filesystem type (no `null.fs` bundle for `mount(8)` to exec), and the VFS the
+kernel does register under `nullfs` refuses its mount entry point without the private
+entitlement `com.apple.private.nullfs_allow`, with no superuser fallback. It is a platform
+limit, not a build gap, not a PATH gap, not a privilege gap, and not something a vendored
+helper or an entitlement a third-party binary can acquire overrides. Rolling a newer Macker
+does not change it. maclet therefore asks the runtime what it can enforce, falling back to
+marker-plus-platform where the runtime cannot answer, and a `readOnly: true` `hostPath` mount
+on a node that cannot reach nullfs is refused at admission:
 
 ```console
 volume mount "/var/data" requests readOnly, but this node cannot enforce a
