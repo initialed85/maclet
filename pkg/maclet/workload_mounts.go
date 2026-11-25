@@ -250,6 +250,16 @@ func mackerVolumeArgs(pod Pod, container ContainerSpec, readOnlySupported bool) 
 	return args, nil
 }
 
+// hostPortIsHostNetworkDefault reports whether a declared hostPort is the value the
+// API server writes by itself for a hostNetwork Pod -- hostPort defaults to
+// containerPort there -- rather than a host-port mapping the manifest asked for.
+// maclet does not implement host-port mapping, but rejecting the default would make
+// any hostNetwork Pod with ports impossible on this node class, which upstream
+// Kubernetes plainly allows.
+func hostPortIsHostNetworkDefault(hostNetwork bool, port ContainerPort) bool {
+	return hostNetwork && port.HostPort == port.ContainerPort
+}
+
 func (m *workloadManager) runArgs(pod Pod, container ContainerSpec, managed *managedWorkload) ([]string, error) {
 	return m.runArgsWithContext(context.Background(), pod, container, managed)
 }
@@ -316,7 +326,7 @@ func (m *workloadManager) runArgsWithContext(ctx context.Context, pod Pod, conta
 	// application with a hard-coded listener port).
 	portForward := pod.ObjectMeta.Annotations[nativeDisablePortForwardAnnotation] != "true"
 	for index, port := range container.Ports {
-		if port.HostPort != 0 {
+		if port.HostPort != 0 && !hostPortIsHostNetworkDefault(pod.Spec.HostNetwork, port) {
 			return nil, refuseManifest("container port %d requests hostPort %d; maclet does not support host-port mapping yet", port.ContainerPort, port.HostPort)
 		}
 		if port.ContainerPort < 1 || port.ContainerPort > 65535 {
@@ -385,9 +395,15 @@ func (m *workloadManager) hostNetworkRunArgs(ctx context.Context, pod Pod, conta
 	for _, value := range environment {
 		args = append(args, "--env", value)
 	}
-	portForward := pod.ObjectMeta.Annotations[nativeDisablePortForwardAnnotation] != "true"
+	// With hostNetwork the declared container port *is* the host port, which is what
+	// ordinary Kubernetes does. Macker's `-p CONTAINER:auto/tcp` shape would move
+	// the process onto an allocated port and PF-redirect the declared port to it, so
+	// nothing would ever listen on the port the Pod asked for. Publish no mapping and
+	// hand each token its declared value directly; Macker installs PF rules only when
+	// -p is present. nativeDisablePortForward has no meaning on this path, because it
+	// never forwards.
 	for index, port := range container.Ports {
-		if port.HostPort != 0 {
+		if port.HostPort != 0 && !hostPortIsHostNetworkDefault(pod.Spec.HostNetwork, port) {
 			return nil, refuseManifest("container port %d requests hostPort %d; maclet does not support host-port mapping yet", port.ContainerPort, port.HostPort)
 		}
 		if port.ContainerPort < 1 || port.ContainerPort > 65535 {
@@ -400,11 +416,7 @@ func (m *workloadManager) hostNetworkRunArgs(ctx context.Context, pod Pod, conta
 		if protocol != "TCP" && protocol != "UDP" {
 			return nil, refuseManifest("container port %d uses unsupported protocol %q", port.ContainerPort, port.Protocol)
 		}
-		if portForward {
-			args = append(args, "-p", fmt.Sprintf("%d:auto/%s", port.ContainerPort, strings.ToLower(protocol)))
-		} else {
-			args = append(args, "--env", fmt.Sprintf("MACKER_PORT_%d=%d", index+1, port.ContainerPort))
-		}
+		args = append(args, "--env", fmt.Sprintf("MACKER_PORT_%d=%d", index+1, port.ContainerPort))
 	}
 	if len(container.Command) > 0 {
 		args = append(args, "--entrypoint", container.Command[0])

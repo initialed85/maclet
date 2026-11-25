@@ -1,0 +1,4 @@
+# Written by pi-ed's plan substrate: everything in here is runtime state about one agent's
+# session (goal, direction, todos), keyed by session id. None of it belongs in the repository.
+*
+!.gitignore

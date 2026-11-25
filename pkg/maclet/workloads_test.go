@@ -186,15 +186,33 @@ func TestWorkloadRunArgs(t *testing.T) {
 
 func TestHostNetworkRunArgs(t *testing.T) {
 	manager := newWorkloadManager(nil, "/usr/local/bin/macker", "192.0.2.10")
-	pod := Pod{ObjectMeta: ObjectMeta{Namespace: "default", Name: "host", UID: "uid-host", Annotations: map[string]string{nativeDisablePortForwardAnnotation: "true"}}, Spec: PodSpec{HostNetwork: true, DNSPolicy: "ClusterFirstWithHostNet", Containers: []ContainerSpec{{Name: "web", Image: "example/native", Ports: []ContainerPort{{ContainerPort: 8080}}, Command: []string{"/app/server"}}}}}
+	// No nativeDisablePortForward annotation: a hostNetwork Pod binds its declared
+	// port on the host, which is ordinary Kubernetes behaviour, so the direct
+	// shape is the default here rather than something a manifest must opt into.
+	// HostPort mirrors what the API server writes for a hostNetwork Pod; rejecting
+	// it would make every hostNetwork Pod with ports impossible on this node class.
+	pod := Pod{ObjectMeta: ObjectMeta{Namespace: "default", Name: "host", UID: "uid-host"}, Spec: PodSpec{HostNetwork: true, DNSPolicy: "ClusterFirstWithHostNet", Containers: []ContainerSpec{{Name: "web", Image: "example/native", Ports: []ContainerPort{{ContainerPort: 8080, HostPort: 8080}, {ContainerPort: 9093, Protocol: "UDP"}}, Command: []string{"/app/server"}}}}}
 	managed := &managedWorkload{ContainerName: "maclet-default-host-uid-host", IP: "192.0.2.10", HostNetwork: true}
 	args, err := manager.runArgs(pod, pod.Spec.Containers[0], managed)
 	if err != nil {
 		t.Fatal(err)
 	}
 	joined := strings.Join(args, "\x00")
-	if !strings.Contains(joined, "run\x00--detach\x00--net=host") || strings.Contains(joined, "--net=external") || !strings.Contains(joined, "MACKER_PORT_1=8080") {
+	if !strings.Contains(joined, "run\x00--detach\x00--net=host") || strings.Contains(joined, "--net=external") {
 		t.Fatalf("hostNetwork args = %#v", args)
+	}
+	if !strings.Contains(joined, "MACKER_PORT_1=8080") || !strings.Contains(joined, "MACKER_PORT_2=9093") {
+		t.Fatalf("hostNetwork args did not publish the declared ports directly: %#v", args)
+	}
+	for _, arg := range args {
+		if arg == "-p" || strings.HasPrefix(arg, "auto/") {
+			t.Fatalf("hostNetwork args requested a PF mapping, which would move the listener off the declared port: %#v", args)
+		}
+	}
+	// A hostPort that is not the hostNetwork default is still a mapping request.
+	hostPortOnly := Pod{ObjectMeta: ObjectMeta{Namespace: "default", Name: "host", UID: "uid-host"}, Spec: PodSpec{HostNetwork: true, DNSPolicy: "ClusterFirstWithHostNet", Containers: []ContainerSpec{{Name: "web", Image: "example/native", Ports: []ContainerPort{{ContainerPort: 8080, HostPort: 9999}}}}}}
+	if _, err := manager.runArgs(hostPortOnly, hostPortOnly.Spec.Containers[0], managed); err == nil || !strings.Contains(err.Error(), "hostPort 9999") {
+		t.Fatalf("hostNetwork args accepted a real host-port mapping: %v", err)
 	}
 }
 

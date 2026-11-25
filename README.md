@@ -393,7 +393,10 @@ published port behind it (`token ____MACKER_PORT_1____ has no runtime value`), s
 a Pod that omits `ports:` is refused rather than run half-configured. To use a
 fixed direct port instead, set the Pod-template annotation
 `k8s-darwin.dev/disable-port-forward: "true"`; maclet then supplies the
-container port directly as `MACKER_PORT_N` and does not install PF mappings.
+container port directly as `MACKER_PORT_N` and does not install PF mappings. A
+`hostNetwork: true` Pod always takes that direct shape, since its declared port is
+the host port; the API server also defaults `hostPort` to that value for such
+Pods, which maclet accepts as the declared port rather than as a mapping request.
 The Kubernetes Pod status is updated with the allocated
 Pod IP, host IP, phase,
 conditions, and native container state. A terminating/deleted Pod stops and

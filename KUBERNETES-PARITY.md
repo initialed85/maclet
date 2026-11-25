@@ -107,11 +107,11 @@ not what a Linux reader assumes:
 | Pod label `k8s-darwin.dev/native=true` | **Required to be run.** maclet only supervises Pods carrying this label. An unlabelled Pod bound to the node is reported `Pending` with reason `MacletMissingNativeLabel` and a message naming the label, instead of sitting unexplained forever |
 | `spec.containers` | Exactly one. Sidecars are refused (`MacletUnsupportedPod`) |
 | `spec.initContainers` | Not executed, and not refused — see rule 4. Do not rely on an init container for ordering or setup here |
-| `spec.hostNetwork` | Supported with `dnsPolicy: ClusterFirstWithHostNet`; other host-network DNS policies stay `Pending` |
+| `spec.hostNetwork` | Supported with `dnsPolicy: ClusterFirstWithHostNet`; other host-network DNS policies stay `Pending`. The container binds its declared port on the host directly, exactly as on Linux — no PF mapping is installed |
 | `spec.os`, `nodeOS` affinity | The node reports `darwin`; the cluster scheduler decides, maclet does not validate image platforms |
 | Image platform | Darwin-native Mach-O images only. A `linux/amd64` manifest (e.g. `busybox:1.36`) fails in Macker with an OS mismatch and the Pod stays `Pending`. Build a Darwin image (see the `macgrubernetes`/Macker `Mackerfile` workflow) or schedule on a Linux node |
-| `ports[].containerPort` | Published as `-p CONTAINER:auto/tcp` with PodIP + PF remapping. **Required, not informational** on this node class — see "Ports and Macker config tokens" |
-| `ports[].hostPort` | Refused; PodIP port remapping through PF is the model |
+| `ports[].containerPort` | **Required, not informational** on this node class — see "Ports and Macker config tokens". A PodIP workload becomes `-p CONTAINER:auto/tcp` (PodIP + PF remapping); a hostNetwork workload binds the declared port directly |
+| `ports[].hostPort` | Refused, because maclet does not implement host-port mapping — **except** the `hostPort == containerPort` value the API server writes by itself for a hostNetwork Pod, which is accepted as the declared port |
 | `livenessProbe`, `readinessProbe`, `startupProbe` | Not enforced (rule 4). `Ready` reflects "Macker reports the process running", nothing more |
 | `resources` | Not enforced. The node advertises the host machine |
 | `imagePullPolicy` | Not honoured; a missing image is pulled lazily, a present one is never re-pulled |
@@ -214,6 +214,30 @@ Measured 2026-11-25 on `icarus-2.local`, three Pods, same image
 | `ports: [{containerPort: 8080}]`, writable `hostPath` mount | `Running` — "Macker is running the trusted native workload" |
 | no `ports:`, same writable mount | refused, token error above; the captured argv contains no `-p` at all |
 | `ports: [{containerPort: 8080}]`, `readOnly: true` mount | `:ro` forwarded correctly; failed later at the mount, see below |
+
+### hostNetwork Pods bind the declared port, and their defaulted hostPort is not a mapping request
+
+For a PodIP workload, `-p CONTAINER:auto/tcp` is right: Macker allocates a private
+process port, injects it as `MACKER_PORT_N`, and PF redirects PodIP:CONTAINER to
+it, so overlapping rollout generations can coexist. For a `hostNetwork: true`
+workload that shape is wrong twice over — the process would listen on an
+allocated 30000-32767 port instead of the port the Pod declared, and PF would sit
+on the declared port pretending to be the app. maclet therefore publishes nothing
+for a hostNetwork Pod and supplies `--env MACKER_PORT_N=<containerPort>` instead,
+which is what the declared port means on Linux.
+
+That path also exposed a self-inflicted impossibility, measured on `icarus-2.local`
+the same day: the Kubernetes API server defaults `hostPort` to `containerPort`
+for a hostNetwork Pod, and maclet refused any non-zero `hostPort`, so
+
+```console
+container port 8080 requests hostPort 8080; maclet does not support host-port mapping yet
+```
+
+rejected *every* hostNetwork Pod that declared ports — a manifest ordinary
+Kubernetes runs happily, killed by a field the user never wrote. maclet now
+accepts the hostNetwork default as the declared port and still refuses a genuine
+mapping request (`hostPort != containerPort`, or any `hostPort` on a PodIP Pod).
 
 ## Verifying it from the cluster
 
