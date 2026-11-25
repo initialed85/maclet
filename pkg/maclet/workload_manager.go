@@ -130,8 +130,8 @@ func (m *workloadManager) mackerHelpOutput(args ...string) []byte {
 
 // supportsReadOnlyVolumes reports whether a read-only -v mount can actually be
 // enforced here. Two things have to be true: the installed Macker must accept the
-// third `ro` field (its usage marker), and this node's kernel must be able to make
-// a read-only bind mount at all. The answer is cached; a negative answer is retried
+// third `ro` field (its usage marker), and this node must be able to make a
+// read-only bind mount at all. The answer is cached; a negative answer is retried
 // after mackerReadOnlyVolumeRetry so upgrading Macker or the OS heals an
 // already-joined node.
 func (m *workloadManager) supportsReadOnlyVolumes() bool {
@@ -149,19 +149,34 @@ func (m *workloadManager) supportsReadOnlyVolumes() bool {
 	if m.readOnlyVolumes != nil && (*m.readOnlyVolumes || time.Since(m.readOnlyVolumesProbedAt) < mackerReadOnlyVolumeRetry) {
 		return *m.readOnlyVolumes
 	}
-	supported := mackerHelpAdvertisesReadOnlyVolumes(string(m.mackerHelpOutput("run", "--help")))
-	if supported && !m.readOnlyPlatformSupportsMounts() {
-		// Macker's marker is argument grammar. On a macOS without nullfs the binary
-		// still accepts `:ro` and the mount still fails, so check the platform before
-		// promising a Pod its volume will be read-only.
-		supported = false
-	}
+	supported, decidedByRuntime := m.readOnlyVolumeCapability()
 	if m.debug {
-		log.Printf("debug: Macker read-only volume support detected: %t", supported)
+		log.Printf("debug: Macker read-only volume support detected: %t (from runtime probe: %t)", supported, decidedByRuntime)
 	}
 	m.readOnlyVolumes = &supported
 	m.readOnlyVolumesProbedAt = time.Now()
 	return supported
+}
+
+// readOnlyVolumeCapability asks whether a read-only -v mount can actually be
+// enforced here. `macker volumes --format json` is the authoritative answer where it
+// exists, because only the runtime knows whether a vendored helper
+// (MACKER_MOUNT_NULLFS), a bundle, or a kernel feature will make its mount succeed.
+// Where the installed Macker predates that probe, maclet falls back to the help
+// marker -- argument grammar, which says nothing about the kernel -- and then to its
+// own read-only of the platform.
+func (m *workloadManager) readOnlyVolumeCapability() (bool, bool) {
+	if verdict, ok := parseMackerReadOnlyVerdict(m.mackerHelpOutput("volumes", "--format", "json")); ok {
+		return verdict.ReadOnlySupported, true
+	}
+	supported := mackerHelpAdvertisesReadOnlyVolumes(string(m.mackerHelpOutput("run", "--help")))
+	if supported && !m.readOnlyPlatformSupportsMounts() {
+		// A Macker that advertises `:ro` on a macOS without nullfs still accepts the
+		// flag and still fails the mount, so the platform has to be checked before
+		// promising a Pod its volume will be read-only.
+		supported = false
+	}
+	return supported, false
 }
 
 // readOnlyPlatformSupportsMounts reports whether the running OS provides nullfs,

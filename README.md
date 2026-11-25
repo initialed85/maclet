@@ -412,16 +412,21 @@ its full destination (for example, `/usr/share/nginx/html/index.html`), or use
 a `File` hostPath without `subPath`. ConfigMap volumes are materialized into
 per-Pod state directories and support `items`, `defaultMode`, `binaryData`, and
 optional missing ConfigMaps. `readOnly` hostPath mounts are negotiated in two
-stages: maclet probes whether the installed Macker advertises
-`HOST:CONTAINER[:ro]` (a negative answer is re-probed after 5 minutes, so a
-Macker upgrade heals a joined node), and then checks that the OS actually
-provides nullfs -- a helper (`/sbin/mount_nullfs`, `/sbin/mount_null`), a
+stages: maclet first asks the runtime, via `macker volumes --format json`
+(`read_only_supported`), which knows the mount path it will actually take --
+including a vendored helper named by `MACKER_MOUNT_NULLFS`. Where an older Macker
+cannot answer, maclet falls back to probing whether `macker run --help` advertises
+`HOST:CONTAINER[:ro]` (a contract/version check: a negative answer is re-probed
+after 5 minutes, so a Macker upgrade heals a joined node) and then checking that
+the OS provides nullfs -- a helper (`/sbin/mount_nullfs`, `/sbin/mount_null`), a
 `null.fs` mount bundle, or the `vfs.generic.nullfs` kernel feature. Both must
 answer yes before `:ro` is passed through, because the marker describes Macker's
 argument grammar, not the kernel underneath it: macOS 26 / Darwin 25.6 arm64
-ships no nullfs at all, so no Macker build can enforce a read-only hostPath
-mount there and maclet refuses such a Pod at admission instead of launching it
-into a mount failure. Where nullfs does exist, Macker enforces a node-wide
+ships no nullfs at all -- home-ops measured `mount(2)` fstype `null` returning
+`ENODEV`, the same class as a bogus filesystem name, so the VFS is not even
+registered -- and no Macker build can enforce a read-only hostPath mount there.
+maclet refuses such a Pod at admission instead of launching it into a mount
+failure. Where nullfs does exist, Macker enforces a node-wide
 read-only nullfs mount, and read-only means writes through that mount fail with
 `EROFS`; it is not containment, because a darwin-native workload runs without
 `chroot` and can open the same host path directly with its own host permissions.

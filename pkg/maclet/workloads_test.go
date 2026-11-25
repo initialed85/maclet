@@ -566,6 +566,65 @@ func TestMackerReportsReadOnlyMountFailure(t *testing.T) {
 	}
 }
 
+// TestReadOnlyVolumeCapabilityPrefersMackerVolumesVerdict keeps the two probes from
+// disagreeing where the runtime has the better view: Macker knows about a vendored
+// mount helper (MACKER_MOUNT_NULLFS) and about the mount path it actually takes,
+// which maclet's look at /sbin and the kernel feature table cannot see.
+func TestReadOnlyVolumeCapabilityPrefersMackerVolumesVerdict(t *testing.T) {
+	root := t.TempDir()
+	binary := filepath.Join(root, "macker-probing")
+	script := "#!/bin/sh\n" +
+		"case \"$1 $2\" in\n" +
+		"'volumes --format') echo 'RESULT'; exit 0;;\n" +
+		"esac\n" +
+		"echo '    \thost path and container path, HOST:CONTAINER[:ro] (repeatable)'\n" +
+		"exit 2\n"
+	if err := os.WriteFile(binary, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	absentPlatform := &readOnlyPlatformProbe{exists: func(string) bool { return false }, kernelFeature: func(string) bool { return false }}
+	supportedJSON := `{"read_only_supported": true, "mechanism": "helper", "reason": "MACKER_MOUNT_NULLFS override"}`
+	refusedJSON := `{"read_only_supported": false, "mechanism": "none", "reason": "this macOS has no null filesystem bundle"}`
+	for _, tc := range []struct {
+		name    string
+		verdict string
+		expect  bool
+	}{
+		{"runtime accepts a helper maclet cannot see", supportedJSON, true},
+		{"runtime refuses despite the marker", refusedJSON, false},
+	} {
+		if err := os.WriteFile(binary, []byte(strings.Replace(script, "RESULT", tc.verdict, 1)), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		manager := newWorkloadManager(nil, binary, "")
+		manager.readOnlyPlatform = absentPlatform
+		if got := manager.supportsReadOnlyVolumes(); got != tc.expect {
+			t.Errorf("%s: supportsReadOnlyVolumes() = %t, want %t", tc.name, got, tc.expect)
+		}
+	}
+	// A Macker without the `volumes` subcommand answers with usage text, which is not a
+	// verdict: the help marker and the platform probe have to carry the decision.
+	legacy := filepath.Join(root, "macker-legacy")
+	if err := os.WriteFile(legacy, []byte("#!/bin/sh\necho '    \thost path and container path, HOST:CONTAINER[:ro] (repeatable)'\nexit 2\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	manager := newWorkloadManager(nil, legacy, "")
+	manager.readOnlyPlatform = absentPlatform
+	if manager.supportsReadOnlyVolumes() {
+		t.Fatal("a legacy Macker on a platform without nullfs reported enforceable read-only volumes")
+	}
+}
+
+func TestParseMackerReadOnlyVerdictIgnoresUsageText(t *testing.T) {
+	if _, ok := parseMackerReadOnlyVerdict([]byte("usage:\n  macker volumes [--format json|table]\n")); ok {
+		t.Fatal("usage text parsed as a capability verdict")
+	}
+	verdict, ok := parseMackerReadOnlyVerdict([]byte("read-only volumes: refused\n{\"read_only_supported\":false,\"mechanism\":\"none\"}\n"))
+	if !ok || verdict.ReadOnlySupported {
+		t.Fatalf("verdict = %+v ok=%t, want a refused answer", verdict, ok)
+	}
+}
+
 func TestDesiredPodStatus(t *testing.T) {
 	pod := Pod{ObjectMeta: ObjectMeta{Name: "web", Namespace: "default"}, Spec: PodSpec{Containers: []ContainerSpec{{Name: "web", Image: "example/web:latest"}}}, Status: PodStatus{Phase: "Pending", Conditions: []PodCondition{{Type: "PodScheduled", Status: "False"}}}}
 	status := desiredPodStatus(pod, "192.168.137.111", "Running", "10.42.8.3", "MacletWorkloadRunning", "running", true, 2)

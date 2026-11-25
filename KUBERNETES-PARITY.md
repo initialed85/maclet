@@ -51,10 +51,16 @@ by mapping the directory with nullfs (`mount -t null -o ro`, or the
 inside the mount fail with `EROFS` for the workload process. maclet negotiates
 that capability in two stages:
 
-- maclet asks the installed Macker whether `macker run --help` advertises the
-  marker `HOST:CONTAINER[:ro]`. The answer is cached; a negative answer is
-  re-probed after 5 minutes, so upgrading Macker heals an already-joined node
-  without restarting maclet.
+- maclet asks the installed Macker what it can enforce. `macker volumes --format
+  json` (Macker ≥ `4527b97`) is the authoritative per-node verdict — it is the
+  runtime's own answer about the mount path it will take, including a vendored
+  helper named by `MACKER_MOUNT_NULLFS`, which maclet cannot see from outside. Where
+  that subcommand does not exist (the answer comes back as usage text), maclet falls
+  back to two checks of its own: whether `macker run --help` advertises the marker
+  `HOST:CONTAINER[:ro]`, which is a contract/version check only, and whether this OS
+  can make a read-only bind mount at all. The answer is cached; a negative answer is
+  re-probed after 5 minutes, so upgrading Macker or the OS heals an already-joined
+  node without restarting maclet.
 - **Advertised, and the OS has nullfs:** `readOnly` is passed through as
   `-v HOST:CONTAINER:ro`.
 - **Either answer no:** the Pod is refused at admission, and maclet never sends
@@ -76,11 +82,19 @@ mount: /private/tmp/mdst failed with 72
 ```
 
 So on that node **no Macker build can enforce a read-only `hostPath` mount**: the
-helper is not missing from `$PATH`, the filesystem is missing from the OS.
-maclet's probe turns that into an admission refusal instead of a doomed launch.
-The failure is not privilege either: the same node grants `(ALL) NOPASSWD: ALL` to
-the user maclet runs as (uid 501), `sudo -n -v` succeeds, and the `mount` above ran
-as root and returned mount's own error 72, not a `sudo` complaint.
+helper is not missing from `$PATH`, the filesystem is missing from the OS. And it is
+missing from the kernel too, measured below this document's level: home-ops ran a
+proven-convention `mount(2)` probe on the same box — syscall 167, four arguments
+`(type, path, flags, data)`, calibrated because as root `devfs` genuinely mounted
+while `apfs`/`hfs` returned `EINVAL` — and fstype `null` returned **`ENODEV` (19),
+byte-identical to a `bogusfsxyz` control**. The nullfs VFS is not registered in the
+macOS 26.6.2 release kernel; Apple keeps `bsd/miscfs/nullfs/` in the source tree and
+builds it out, so there is no helper path, no `MACKER_MOUNT_NULLFS` override, and no
+entitlement that makes this mount on that OS. maclet's probe turns that into an
+admission refusal instead of a doomed launch. The failure is not privilege either:
+the same node grants `(ALL) NOPASSWD: ALL` to the user maclet runs as (uid 501),
+`sudo -n -v` succeeds, and the `mount` above ran as root and returned mount's own
+error 72, not a `sudo` complaint.
 
 The one shape read-only cannot cover is a **single file**. macOS
 `mount_nullfs` mounts directory subtrees, not files, so maclet refuses a
@@ -187,11 +201,14 @@ the sensitive tree writable.
 
 **Conclusion as of 2026-11-25, replacing what this section previously claimed:**
 read-only `hostPath` enforcement is **not achievable on macOS 26 / Darwin 25.6
-arm64**, because the OS provides no nullfs — not as a helper, not as a `mount(8)`
-filesystem, not as a kernel feature. It is a platform limit, not a build gap, and
-rolling a newer Macker does not change it. maclet therefore checks the platform as
-well as the marker, and a `readOnly: true` `hostPath` mount on a node without
-nullfs is refused at admission:
+arm64**. The OS provides no nullfs — not as a helper, not as a `mount(8)`
+filesystem, not as a kernel feature, and (measured with `mount(2)` directly) not as a
+registered VFS in the release kernel. It is a platform limit, not a build gap, not a
+PATH gap, not a privilege gap, and not something a vendored helper or an entitlement
+overrides. Rolling a newer Macker does not change it. maclet therefore asks the
+runtime what it can enforce, falling back to marker-plus-platform where the runtime
+cannot answer, and a `readOnly: true` `hostPath` mount on a node without nullfs is
+refused at admission:
 
 ```console
 volume mount "/var/data" requests readOnly, but this node cannot enforce a

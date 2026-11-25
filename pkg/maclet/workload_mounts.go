@@ -2,6 +2,7 @@ package maclet
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -148,6 +149,36 @@ const mackerReadOnlyVolumeMarker = "HOST:CONTAINER[:ro]"
 
 func mackerHelpAdvertisesReadOnlyVolumes(help string) bool {
 	return strings.Contains(help, mackerReadOnlyVolumeMarker)
+}
+
+// mackerReadOnlyVerdict is what `macker volumes --format json` reports about the
+// node it runs on. The runtime owns the mount path, including a vendored helper
+// pointed at with MACKER_MOUNT_NULLFS, so where this answers, it wins over maclet's
+// own look at the platform.
+type mackerReadOnlyVerdict struct {
+	ReadOnlySupported bool   `json:"read_only_supported"`
+	Mechanism         string `json:"mechanism"`
+	Reason            string `json:"reason"`
+}
+
+// parseMackerReadOnlyVerdict reads the JSON object out of a `macker volumes` answer.
+// A Macker that predates the subcommand prints usage text instead, which parses to
+// nothing and sends the caller back to the help marker and the platform probe.
+func parseMackerReadOnlyVerdict(output []byte) (mackerReadOnlyVerdict, bool) {
+	start := strings.Index(string(output), "{")
+	if start < 0 {
+		return mackerReadOnlyVerdict{}, false
+	}
+	var verdict mackerReadOnlyVerdict
+	if err := json.Unmarshal(output[start:], &verdict); err != nil {
+		return mackerReadOnlyVerdict{}, false
+	}
+	// Macker reports the verdict under its own name; anything without that key is not
+	// an answer, so it must not be read as "unsupported".
+	if !strings.Contains(string(output[start:]), "read_only_supported") {
+		return mackerReadOnlyVerdict{}, false
+	}
+	return verdict, true
 }
 
 // mackerReportsReadOnlyMountFailure recognises Macker saying it could not perform

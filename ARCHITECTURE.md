@@ -287,10 +287,12 @@ same mapping. NFS mounts are host-visible and Macker cannot enforce read-only
 semantics on the symlink mapping; lifecycle ownership is journaled so restart
 cleanup only unmounts paths maclet owns. The materialized files are writable
 copies unless the runtime and the OS can both enforce read-only volumes: maclet
-probes the installed Macker for the `HOST:CONTAINER[:ro]` usage marker and then
-checks that the platform provides nullfs (a helper, a `null.fs` mount bundle, or
-the `vfs.generic.nullfs` kernel feature), and only asks for a read-only mapping
-when both answer yes. Macker then enforces a node-wide read-only nullfs mount for
+asks `macker volumes --format json` for the node verdict (`read_only_supported`),
+which knows the mount path Macker will take and any `MACKER_MOUNT_NULLFS` helper;
+where an older Macker cannot answer it falls back to the `HOST:CONTAINER[:ro]` usage
+marker (contract/version) plus its own look for nullfs (a helper, a `null.fs` mount
+bundle, or the `vfs.generic.nullfs` kernel feature), and only asks for a read-only
+mapping when the verdict is yes. Macker then enforces a node-wide read-only nullfs mount for
 the volume's lifetime (privileged, like PF and NFS). The second check matters
 because the marker is argument grammar, not a kernel measurement: macOS 26 /
 Darwin 25.6 arm64 ships no nullfs, so there `readOnly` hostPath mounts are refused
