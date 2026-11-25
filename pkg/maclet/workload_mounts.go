@@ -275,19 +275,22 @@ func mackerReportsReadOnlyMountFailure(detail string) bool {
 // and it answers EPERM even as root, where the Linux-style name `null` answers ENODEV (19)
 // exactly as a made-up name does. That matches macker's reading of xnu-12377.121.6, where
 // bsd/miscfs/nullfs is built in and nullfs_mount() is gated on the private entitlement
-// com.apple.private.nullfs_allow with no superuser fallback -- so no helper, vendored or
-// otherwise, can mount here, and neither root nor an entitlement a third-party binary can
-// hold changes the answer. The `vfs.generic.nullfs` sysctl is consulted only as weak
-// positive evidence: `vfs.generic` lists tunables, not registered filesystems (it omits
-// devfs, which demonstrably mounts), so its absence settles nothing and it can never grant
-// on its own. Everything ends the same place: no Macker build can enforce a read-only
-// hostPath mount on this OS, so maclet refuses it at admission. The probe checks presence
-// rather than mounting, because a real mount would need root and would make unit tests
-// depend on the machine running them.
+// com.apple.private.nullfs_allow with no superuser fallback -- so the refusal is a gate on
+// who holds the entitlement rather than on where a helper came from: a caller that held
+// com.apple.private.nullfs_allow would be allowed to mount, and no helper obtainable on
+// this node holds it, vendored or otherwise, so neither root nor a `MACKER_MOUNT_NULLFS`
+// override changes the answer here. The `vfs.generic.nullfs` sysctl is read for wording only and
+// never grants (see hasNullfs): `vfs.generic` lists tunables, not registered filesystems
+// (it omits devfs, which demonstrably mounts), so its absence settles nothing and its
+// presence would not make the mount enforceable. Everything ends the same place: no
+// Macker build can enforce a read-only hostPath mount on this OS, so maclet refuses it at
+// admission. The probe checks presence rather than mounting, because a real mount would
+// need root and would make unit tests depend on the machine running them.
 type readOnlyPlatformProbe struct {
 	// exists reports whether a path is present. Helpers, filesystem bundles.
 	exists func(path string) bool
-	// kernelFeature reports whether the kernel exposes a name (sysctl oid).
+	// kernelFeature reports whether the kernel exposes a name (sysctl oid). It is
+	// diagnostic only and never decides hasNullfs; see the comment there.
 	kernelFeature func(name string) bool
 }
 
@@ -308,6 +311,31 @@ var readOnlyNullfsKernelFeatures = []string{
 	"vfs.generic.nullfs",
 }
 
+// kernelRegistersNullfs is what the sysctl oid is good for: a wording input, so a
+// refusal can tell an operator whether the kernel claims the code is there while the
+// mount route is not. It is not evidence that a read-only mount can be made.
+func (p readOnlyPlatformProbe) kernelRegistersNullfs() bool {
+	if p.kernelFeature == nil {
+		return false
+	}
+	for _, name := range readOnlyNullfsKernelFeatures {
+		if p.kernelFeature(name) {
+			return true
+		}
+	}
+	return false
+}
+
+// hasNullfs reports whether this OS has a route a mount(8) call or helper can actually
+// take to a read-only null mount: a mount helper, or a filesystem bundle for mount(8)
+// to exec. A kernel sysctl oid is deliberately not enough, and dropping that branch
+// closes the one way maclet could outvote a kernel that refuses the mount. Two
+// measurements on the icarus node say why: `sysctl vfs.generic` lists tunables rather
+// than registered filesystems (it omits devfs, which mounts and unmounts cleanly), so
+// the oid is not a mount registry; and this kernel does have nullfs and still answers
+// EPERM at the mount entry point, because nullfs_mount() requires the private
+// entitlement com.apple.private.nullfs_allow. Registration and enforceability are
+// different questions, and only the second one licenses a `:ro` promise.
 func (p readOnlyPlatformProbe) hasNullfs() bool {
 	for _, path := range readOnlyNullfsHelpers {
 		if p.exists(path) {
@@ -316,11 +344,6 @@ func (p readOnlyPlatformProbe) hasNullfs() bool {
 	}
 	for _, path := range readOnlyNullfsBundles {
 		if p.exists(path) {
-			return true
-		}
-	}
-	for _, name := range readOnlyNullfsKernelFeatures {
-		if p.kernelFeature(name) {
 			return true
 		}
 	}

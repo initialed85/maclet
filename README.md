@@ -423,8 +423,12 @@ including a vendored helper named by `MACKER_MOUNT_NULLFS`. Where an older Macke
 cannot answer, maclet falls back to probing whether `macker run --help` advertises
 `HOST:CONTAINER[:ro]` (a contract/version check: a negative answer is re-probed
 after 5 minutes, so a Macker upgrade heals a joined node) and then checking that
-the OS provides nullfs -- a helper (`/sbin/mount_nullfs`, `/sbin/mount_null`), a
-`null.fs` mount bundle, or the `vfs.generic.nullfs` kernel feature. Both must
+the OS provides nullfs -- a helper (`/sbin/mount_nullfs`, `/sbin/mount_null`) or a
+`null.fs` mount bundle for `mount(8)` to exec. A kernel sysctl oid is read for wording
+only and never grants: `vfs.generic` lists tunables rather than filesystems (it omits
+`devfs`, which mounts and unmounts cleanly on this node), and being registered is not the
+same as being mountable -- this macOS registers `nullfs` and still refuses the mount. Both
+the marker and the OS look must
 answer yes before `:ro` is passed through, because the marker describes Macker's
 argument grammar, not the kernel underneath it: on macOS 26 / Darwin 25.6 arm64
 the filesystem *is* registered, under the type name `nullfs` (the Linux name

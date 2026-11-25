@@ -260,7 +260,7 @@ func (m *workloadManager) readOnlyVolumeCapability() (bool, bool, string, string
 		// A Macker that advertises `:ro` on a macOS that cannot reach nullfs still accepts
 		// the flag and still fails the mount, so the platform has to be checked before
 		// promising a Pod its volume will be read-only.
-		return false, false, "this operating system provides no usable read-only bind mount for a hostPath: no mount helper and no null filesystem bundle for the userland route. This kernel does build nullfs, and mount(2) for the registered type name answers EPERM even as root, because nullfs_mount() requires the private entitlement com.apple.private.nullfs_allow with no superuser fallback -- so neither root nor a vendored helper can create the read-only view a readOnly volume asks for.", "maclet's own reading of this operating system, because this Macker build can be asked for a verdict and cannot produce one"
+		return false, false, "this operating system provides no usable read-only bind mount for a hostPath: no mount helper and no null filesystem bundle for the userland route. " + m.readOnlyKernelNullfsWording(), "maclet's own reading of this operating system, because this Macker build can be asked for a verdict and cannot produce one"
 	}
 	return supported, false, "", "its `run --help` marker, which is argument grammar and not a capability answer"
 }
@@ -334,7 +334,7 @@ var mackerReadOnlyFalsifiedClaims = []struct {
 	},
 	{
 		fragment: "errno 19 on Darwin is ENOTSUP",
-		instead:  "errno 19 is ENODEV on both Darwin and Linux (Apple's bsd/sys/errno.h comments it \"operation not supported by device\"); ENOTSUP is 45 on Darwin and 95 on Linux",
+		instead:  "errno 19 is ENODEV on both Darwin and Linux (Apple's bsd/sys/errno.h comments it \"operation not supported by device\"); ENOTSUP is 45 on Darwin and 95 on Linux. Checked on the Linux side too rather than assumed: syscall.ENODEV = 19 (\"no such device\"), syscall.EOPNOTSUPP = 95. Macker states it correctly from build-41 (7837864) onward, which is why maclet prefers that build over the one that prints this sentence",
 	},
 	{
 		// Macker build-40 (2250a51) named bindfs in guidance and got the closure wrong: it
@@ -389,6 +389,27 @@ func (m *workloadManager) readOnlyPlatformSupportsMounts() bool {
 		probe = &defaultProbe
 	}
 	return probe.hasNullfs()
+}
+
+// readOnlyKernelNullfsWording finishes the platform refusal with the kernel half, and it
+// declines to assert what maclet cannot observe. That sentence used to state, on every
+// node, that the running kernel builds nullfs -- true on this OS, and exactly the failure
+// maclet exists to police anywhere else: a node agent publishing an unverified mechanism
+// claim about its own kernel inside a Pod's status. The sysctl oid is the only thing maclet
+// can actually see, so it is named as what it is, an oid rather than a capability, and the
+// macOS measurement is attributed to the node it was measured on rather than asserted about
+// the reader's kernel. Registration and enforceability are different questions here: this
+// kernel registers nullfs and still answers EPERM at the mount entry point.
+func (m *workloadManager) readOnlyKernelNullfsWording() string {
+	probe := m.readOnlyPlatform
+	if probe == nil {
+		defaultProbe := defaultReadOnlyPlatformProbe()
+		probe = &defaultProbe
+	}
+	if probe.kernelRegistersNullfs() {
+		return "This kernel exposes a nullfs sysctl node, which says the code is present and says nothing about whether a mount can be made: mount(2) for the registered type name answers EPERM even as root on macOS 26.6.2 (Darwin 25.6.0, arm64), because nullfs_mount() requires the private entitlement com.apple.private.nullfs_allow with no superuser fallback, so the read-only view a readOnly volume asks for is not reachable from this node."
+	}
+	return "maclet cannot establish from this node whether the kernel would accept a read-only null mount, and a sysctl listing would not settle it either: `vfs.generic` lists tunables rather than filesystems, and on macOS 26.6.2 (Darwin 25.6.0, arm64) the type name nullfs is registered while mount(2) still answers EPERM even as root, because nullfs_mount() requires the private entitlement com.apple.private.nullfs_allow with no superuser fallback."
 }
 
 // noteReadOnlyVolumeNodeRejection downgrades the cached capability answer when

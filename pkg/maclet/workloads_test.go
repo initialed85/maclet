@@ -517,9 +517,11 @@ func TestReadOnlyRefusalCarriesTheRuntimesOwnCause(t *testing.T) {
 	}
 }
 
-// TestReadOnlyPlatformProbeRequiresNullfs pins the platform question: a node with
-// no nullfs helper, no null.fs bundle, and no nullfs kernel feature cannot enforce
-// a read-only hostPath mount, which is what the icarus node measures.
+// TestReadOnlyPlatformProbeRequiresNullfs pins the platform question: only a route a mount
+// call or helper can actually take -- a mount helper, or a filesystem bundle for mount(8)
+// to exec -- counts. A kernel sysctl oid does not, which is the distinction this node
+// measures: macOS 26.6.2 registers nullfs and mount(2) still answers EPERM, so a node that
+// looked registered to a sysctl reader was a node that could not enforce a read-only mount.
 func TestReadOnlyPlatformProbeRequiresNullfs(t *testing.T) {
 	absent := readOnlyPlatformProbe{exists: func(string) bool { return false }, kernelFeature: func(string) bool { return false }}
 	if absent.hasNullfs() {
@@ -533,11 +535,25 @@ func TestReadOnlyPlatformProbeRequiresNullfs(t *testing.T) {
 		{"helper", readOnlyPlatformProbe{exists: func(path string) bool { return path == "/sbin/mount_nullfs" }, kernelFeature: func(string) bool { return false }}, true},
 		{"legacy helper", readOnlyPlatformProbe{exists: func(path string) bool { return path == "/sbin/mount_null" }, kernelFeature: func(string) bool { return false }}, true},
 		{"mount(8) bundle", readOnlyPlatformProbe{exists: func(path string) bool { return path == "/Library/Filesystems/null.fs" }, kernelFeature: func(string) bool { return false }}, true},
-		{"kernel feature", readOnlyPlatformProbe{exists: func(string) bool { return false }, kernelFeature: func(name string) bool { return name == "vfs.generic.nullfs" }}, true},
+		// Registration is not a mount route, so an oid alone must never grant `:ro`.
+		{"kernel feature only", readOnlyPlatformProbe{exists: func(string) bool { return false }, kernelFeature: func(name string) bool { return name == "vfs.generic.nullfs" }}, false},
 	} {
 		if got := tc.probe.hasNullfs(); got != tc.expect {
 			t.Errorf("%s: hasNullfs() = %t, want %t", tc.name, got, tc.expect)
 		}
+	}
+	// The oid is still worth reading, for wording rather than permission: a refusal should
+	// be able to say the code is present while the mount is not.
+	oidOnly := readOnlyPlatformProbe{exists: func(string) bool { return false }, kernelFeature: func(name string) bool { return name == "vfs.generic.nullfs" }}
+	if !oidOnly.kernelRegistersNullfs() {
+		t.Fatal("kernelRegistersNullfs() did not report the oid, which is the only kernel fact maclet can observe here")
+	}
+	if absent.kernelRegistersNullfs() {
+		t.Fatal("kernelRegistersNullfs() = true with no oid present")
+	}
+	// A probe with no kernel field at all must not panic on the wording path.
+	if (readOnlyPlatformProbe{exists: func(string) bool { return false }}).kernelRegistersNullfs() {
+		t.Fatal("kernelRegistersNullfs() = true when the probe cannot read the kernel at all")
 	}
 }
 

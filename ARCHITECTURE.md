@@ -293,8 +293,10 @@ that cannot be produced by a helper merely being present; `macker volumes --form
 (`read_only_supported`) gives the runtime's unproven verdict and is used where the probe
 does not exist or reported `mount_not_attempted_privilege`, which says nothing about the
 kernel; and where the installed Macker cannot answer at all, maclet falls back to the
-`HOST:CONTAINER[:ro]` usage marker (contract/version) plus its own look for nullfs (a
-helper, a `null.fs` mount bundle, or the `vfs.generic.nullfs` kernel feature). Macker's
+`HOST:CONTAINER[:ro]` usage marker (contract/version) plus its own look for a nullfs mount
+route (a helper, or a `null.fs` mount bundle; the `vfs.generic.nullfs` oid is read for
+wording only and never grants, because `vfs.generic` lists tunables rather than filesystems
+and registration is not mountability). Macker's
 `reason` is carried verbatim into the Pod's refusal; its `guidance` field is a
 node-operator checklist, so maclet logs it and keeps it out of the Pod's status. Macker
 then enforces a node-wide read-only nullfs mount for the volume's lifetime (privileged,

@@ -236,10 +236,15 @@ user maclet runs as (uid 501), `sudo -n -v` succeeds, and the `mount` above ran 
 returned mount's own error 72, not a `sudo` complaint.
 
 maclet's own offline OS probe stays deliberately weaker than the mount-registry question it
-cannot ask without root: it checks helper and bundle presence and treats a
-`vfs.generic.nullfs` sysctl as a weak positive signal, for the reason macker warns against
-reading its absence -- it can grant nothing on its own, and the runtime answer outranks it at
-every rung of the ladder.
+cannot ask without root: `hasNullfs()` accepts only a route a mount call or helper can take
+-- a helper binary, or a filesystem bundle `mount(8)` can exec -- and the
+`vfs.generic.nullfs` sysctl is read for *wording* only, never as a grant. Two measurements
+say why that distinction is load-bearing here rather than theoretical: `vfs.generic` is a
+tunable namespace that omits `devfs`, which demonstrably mounts and unmounts, so the oid is
+not a mount registry in either direction; and this kernel does register `nullfs` while
+`mount(2)` still answers `EPERM`, so a node that looked registered to a sysctl reader was a
+node that could not enforce a read-only mount. The runtime answer outranks it at every rung
+of the ladder.
 
 What `test-native-workload-lifecycle.sh` asserts about read-only on this node is the
 **refusal contract**, not `EROFS`: `EROFS` inside a container is blocked by the OS here, so
