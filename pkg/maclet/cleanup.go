@@ -35,9 +35,11 @@ type cleanupControllerConfig struct {
 }
 
 func listAssignedPodsInNamespace(ctx context.Context, client *APIClient, nodeName, namespace string) ([]Pod, error) {
+	// No label selector: the sweeper must see every Pod bound to this node, including
+	// ones maclet declined to adopt, and NodeRestriction authorizes exactly that read
+	// (`spec.nodeName=<this node>`) for a node credential.
 	query := url.Values{
 		"fieldSelector": []string{"spec.nodeName=" + nodeName},
-		"labelSelector": []string{nativeWorkloadLabelKey + "=" + nativeWorkloadLabelValue},
 	}
 	path := "/api/v1/namespaces/" + url.PathEscape(namespace) + "/pods?" + query.Encode()
 	body, err := client.Get(ctx, path)
@@ -55,9 +57,15 @@ func cleanupPodList(ctx context.Context, client *APIClient, pods []Pod, nodeName
 	removed := 0
 	var cleanupErrors []error
 	for _, pod := range pods {
-		// Keep the label and node checks client-side as a defense-in-depth
-		// measure in addition to the API field/label selectors.
-		if pod.Spec.NodeName != nodeName || !podHasNativeLabel(pod) || pod.ObjectMeta.DeletionTimestamp == nil {
+		// Only the node and deletion checks, deliberately. The native label gates
+		// *adoption*; it must not gate this, because a Pod bound to a maclet node can be
+		// acknowledged by nothing else whether or not maclet would supervise it. Without
+		// this, a Pod maclet refused (unlabelled, unsupported) that was deleted would sit
+		// in Terminating forever, and a Deployment or StatefulSet that landed a Pod on a
+		// darwin node by mistake would stall waiting for a replacement slot held by the
+		// stuck object. There is no kubelet here to do it instead. The node check is also
+		// kept client-side as defense-in-depth alongside the API field/label selectors.
+		if pod.Spec.NodeName != nodeName || pod.ObjectMeta.DeletionTimestamp == nil {
 			continue
 		}
 		deletedAt := pod.ObjectMeta.DeletionTimestamp.Time
@@ -70,11 +78,11 @@ func cleanupPodList(ctx context.Context, client *APIClient, pods []Pod, nodeName
 			if errors.As(err, &apiErr) && apiErr.Code == http.StatusNotFound {
 				continue
 			}
-			cleanupErrors = append(cleanupErrors, fmt.Errorf("force-delete native Pod %s/%s: %w", pod.ObjectMeta.Namespace, pod.ObjectMeta.Name, err))
+			cleanupErrors = append(cleanupErrors, fmt.Errorf("force-delete Pod %s/%s assigned to %s: %w", pod.ObjectMeta.Namespace, pod.ObjectMeta.Name, nodeName, err))
 			continue
 		}
 		removed++
-		log.Printf("force-deleted stale native Pod %s/%s assigned to %s", pod.ObjectMeta.Namespace, pod.ObjectMeta.Name, nodeName)
+		log.Printf("force-deleted stale Pod %s/%s assigned to %s past its grace period; no other agent can acknowledge a deletion on a darwin node", pod.ObjectMeta.Namespace, pod.ObjectMeta.Name, nodeName)
 	}
 	return removed, errors.Join(cleanupErrors...)
 }
@@ -82,7 +90,7 @@ func cleanupPodList(ctx context.Context, client *APIClient, pods []Pod, nodeName
 func cleanupTerminatingPods(ctx context.Context, client *APIClient, nodeName, namespace string, staleAfter time.Duration, now time.Time) (int, error) {
 	pods, err := listAssignedPodsInNamespace(ctx, client, nodeName, namespace)
 	if err != nil {
-		return 0, fmt.Errorf("list native Pods for cleanup: %w", err)
+		return 0, fmt.Errorf("list Pods assigned to %s for cleanup: %w", nodeName, err)
 	}
 	return cleanupPodList(ctx, client, pods, nodeName, staleAfter, now)
 }
@@ -90,11 +98,10 @@ func cleanupTerminatingPods(ctx context.Context, client *APIClient, nodeName, na
 func cleanupTerminatingPodsClusterWide(ctx context.Context, client *APIClient, nodeName string, staleAfter time.Duration, now time.Time) (int, error) {
 	query := url.Values{
 		"fieldSelector": []string{"spec.nodeName=" + nodeName},
-		"labelSelector": []string{nativeWorkloadLabelKey + "=" + nativeWorkloadLabelValue},
 	}
 	body, err := client.Get(ctx, "/api/v1/pods?"+query.Encode())
 	if err != nil {
-		return 0, fmt.Errorf("list native Pods for cluster-wide cleanup: %w", err)
+		return 0, fmt.Errorf("list Pods assigned to %s for cluster-wide cleanup: %w", nodeName, err)
 	}
 	var pods PodList
 	if err := json.Unmarshal(body, &pods); err != nil {

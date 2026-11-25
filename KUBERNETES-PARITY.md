@@ -169,6 +169,31 @@ not what a Linux reader assumes:
 | `env`, `envFrom`, `valueFrom.secretKeyRef`, `valueFrom.configMapKeyRef`, `fieldRef` | Supported; Secret/ConfigMap reads need the explicitly authorized `--peer-kubeconfig` identity |
 | `workingDir`, `command`, `args` | Supported, passed to Macker |
 | `restartPolicy` | `Always`, `OnFailure`, `Never` are all handled; a succeeded/failed Pod is not resurrected against a non-`Always` policy |
+| Pod deletion | Acknowledged by maclet for **every** Pod bound to this node, supervised or not — see "Who finishes a Pod deletion on a darwin node" |
+
+### Who finishes a Pod deletion on a darwin node
+
+On Linux, a deleted Pod leaves the API server's view because kubelet kills the
+containers and then deletes the Pod object itself once it has reported a terminal
+phase. Nothing else does that here, so maclet owns it, and it owns it for Pods it
+*refused* too: the sweeper lists every Pod with `spec.nodeName=<this node>` (no label
+selector, because a node credential is authorized for exactly that read) and
+force-deletes any of them whose `deletionTimestamp` is past the stale window. Both
+halves matter. maclet's own teardown path writes a terminal `Failed` phase with reason
+`MacletWorkloadDeleted` before the API server completes a graceful deletion of an
+adopted Pod. And a Pod maclet never adopted — unlabelled, or refused as unsupported —
+has no agent at all otherwise, so it sits `Terminating` indefinitely, which is worse
+than cosmetic: a Deployment or StatefulSet rolling a Pod onto a darwin node by mistake
+waits on a replacement slot held by the object that is already gone. `staleAfter` is
+45s cluster-wide and 5s for native Pods, so the acknowledgement is bounded and the
+window is short enough that a genuinely slow teardown is not cut off.
+
+Measured on `icarus-2.local` 2026-11-25: an unlabelled Pod bound to the node kept
+`deletionTimestamp: 2026-11-25T09:38:54Z` and `phase: Failed` long after deletion and
+needed `kubectl delete pod --force --grace-period=0`; the fix is the label-free
+sweeper described above. The force-delete path itself is verified by tests, and a
+refused Pod still gets its `MacletMissingNativeLabel` Event while it is alive, so the
+reason a workload was never run here is visible before it is removed.
 
 ## How a refusal surfaces
 

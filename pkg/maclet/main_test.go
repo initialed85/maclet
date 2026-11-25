@@ -345,7 +345,7 @@ func TestSetNodeShutdownCordon(t *testing.T) {
 }
 
 func TestCleanupTerminatingPods(t *testing.T) {
-	deleted := false
+	deleted := map[string]bool{}
 	server := httptest.NewTLSServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		switch request.Method {
 		case http.MethodGet:
@@ -355,8 +355,10 @@ func TestCleanupTerminatingPods(t *testing.T) {
 			if got := request.URL.Query().Get("fieldSelector"); got != "spec.nodeName=maclet" {
 				t.Errorf("fieldSelector = %q", got)
 			}
-			if got := request.URL.Query().Get("labelSelector"); got != nativeWorkloadLabelKey+"="+nativeWorkloadLabelValue {
-				t.Errorf("labelSelector = %q", got)
+			// No label selector: a Pod bound to this node needs its deletion acknowledged
+			// even when maclet declined to adopt it, so the sweeper must see those too.
+			if got := request.URL.Query().Get("labelSelector"); got != "" {
+				t.Errorf("labelSelector = %q, want empty", got)
 			}
 			_ = json.NewEncoder(response).Encode(PodList{Items: []Pod{
 				{
@@ -372,16 +374,24 @@ func TestCleanupTerminatingPods(t *testing.T) {
 					Spec:       PodSpec{NodeName: "other"},
 				},
 				{
+					// Bound to this node without the native label: maclet will not run it, so
+					// it must still be swept once deleted, or it hangs in Terminating forever
+					// and holds the rollout slot of whatever owns it.
 					ObjectMeta: ObjectMeta{Namespace: "default", Name: "unmanaged", UID: "uid-unmanaged", Labels: map[string]string{"example.test/owner": "someone-else"}, DeletionTimestamp: testDeletionTimestamp("2026-08-30T17:00:00Z")},
 					Spec:       PodSpec{NodeName: "maclet"},
 				},
 			}})
 		case http.MethodDelete:
-			if request.URL.Path != "/api/v1/namespaces/default/pods/stale" || request.URL.Query().Get("gracePeriodSeconds") != "0" {
+			if request.URL.Query().Get("gracePeriodSeconds") != "0" {
 				t.Fatalf("delete request = %s?%s", request.URL.Path, request.URL.RawQuery)
 			}
-			deleted = true
-			response.WriteHeader(http.StatusOK)
+			switch request.URL.Path {
+			case "/api/v1/namespaces/default/pods/stale", "/api/v1/namespaces/default/pods/unmanaged":
+				deleted[request.URL.Path] = true
+				response.WriteHeader(http.StatusOK)
+			default:
+				t.Fatalf("unexpected delete request = %s", request.URL.Path)
+			}
 		default:
 			http.NotFound(response, request)
 		}
@@ -395,7 +405,7 @@ func TestCleanupTerminatingPods(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if removed != 1 || !deleted {
+	if removed != 2 || len(deleted) != 2 {
 		t.Fatalf("cleanup result = removed %d, deleted %v", removed, deleted)
 	}
 }
@@ -408,7 +418,7 @@ func TestCleanupTerminatingPodsClusterWide(t *testing.T) {
 			if request.URL.Path != "/api/v1/pods" {
 				t.Fatalf("list request path = %s", request.URL.Path)
 			}
-			if request.URL.Query().Get("fieldSelector") != "spec.nodeName=maclet" || request.URL.Query().Get("labelSelector") != nativeWorkloadLabelKey+"="+nativeWorkloadLabelValue {
+			if request.URL.Query().Get("fieldSelector") != "spec.nodeName=maclet" || request.URL.Query().Get("labelSelector") != "" {
 				t.Fatalf("list query = %s", request.URL.RawQuery)
 			}
 			_ = json.NewEncoder(response).Encode(PodList{Items: []Pod{{
