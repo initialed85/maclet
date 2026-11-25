@@ -111,6 +111,12 @@ type workloadManager struct {
 	// all. nil means use the running system; tests replace it.
 	readOnlyPlatform *readOnlyPlatformProbe
 	capabilityMu     sync.Mutex
+	// podEvents remembers the Event maclet last filed per Pod, so a reconcile loop
+	// that rewrites the same status every few seconds says it once. Tests replace
+	// emitEvent to observe what would have been written.
+	podEvents map[string]podEventMemory
+	eventMu   sync.Mutex
+	emitEvent func(context.Context, *APIClient, *Event, bool) error
 }
 
 // mackerReadOnlyVolumeRetry is how long a negative capability answer is trusted.
@@ -240,6 +246,7 @@ func newWorkloadManagerWithState(network *DarwinNetworkHandle, mackerBinary, nod
 		logsRoot:     filepath.Join(stateDir, "logs"),
 		nfsRoot:      filepath.Join(stateDir, "nfs"),
 		logTTL:       defaultNativeLogRetention,
+		podEvents:    make(map[string]podEventMemory),
 	}
 }
 

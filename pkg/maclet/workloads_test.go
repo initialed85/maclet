@@ -709,6 +709,9 @@ func TestDesiredPodStatusIncludesMackerExit(t *testing.T) {
 
 func TestUpdatePodStatusPreservesMetadata(t *testing.T) {
 	server := httptest.NewTLSServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if serveEvent(response, request) {
+			return
+		}
 		if request.Method != http.MethodPut || request.URL.Path != "/api/v1/namespaces/default/pods/web/status" {
 			t.Fatalf("request = %s %s", request.Method, request.URL.Path)
 		}
@@ -750,7 +753,12 @@ func TestUpdatePodStatusPreservesMetadata(t *testing.T) {
 
 func TestExplainUnlabelledPodReportsOnce(t *testing.T) {
 	var writes int32
+	var events int32
 	server := httptest.NewTLSServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if serveEvent(response, request) {
+			atomic.AddInt32(&events, 1)
+			return
+		}
 		if request.Method != http.MethodPut || request.URL.Path != "/api/v1/namespaces/default/pods/web/status" {
 			t.Fatalf("request = %s %s", request.Method, request.URL.Path)
 		}
@@ -780,6 +788,9 @@ func TestExplainUnlabelledPodReportsOnce(t *testing.T) {
 	if got := atomic.LoadInt32(&writes); got != 1 {
 		t.Fatalf("status writes = %d, want 1", got)
 	}
+	if got := atomic.LoadInt32(&events); got != 1 {
+		t.Fatalf("Events filed = %d, want 1 so `kubectl describe pod` shows the node's own account", got)
+	}
 	if pod.Status.Message != unlabelledPendingMessage || string(pod.Status.Phase) != "Pending" {
 		t.Fatalf("unlabelled Pod status = %q/%q", pod.Status.Phase, pod.Status.Message)
 	}
@@ -787,6 +798,9 @@ func TestExplainUnlabelledPodReportsOnce(t *testing.T) {
 	manager.explainUnlabelledPod(context.Background(), client, pod)
 	if got := atomic.LoadInt32(&writes); got != 1 {
 		t.Fatalf("status writes after re-explaining = %d, want 1", got)
+	}
+	if got := atomic.LoadInt32(&events); got != 1 {
+		t.Fatalf("Events filed after re-explaining = %d, want the state said once", got)
 	}
 	// A Pod maclet never ran is not rewritten into Pending.
 	terminal := &Pod{

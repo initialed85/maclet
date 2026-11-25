@@ -324,7 +324,15 @@ a trusted-native node. Every reconciliation pass:
 7. persists ownership before considering the workload healthy; and
 8. updates Pod phase, conditions, container state, PodIP, HostIP, restart count,
    and exit metadata. HostNetwork Pods require `ClusterFirstWithHostNet` and
-   report the node IP as both PodIP and HostIP.
+   report the node IP as both PodIP and HostIP. Alongside a status it authored,
+   maclet files a legacy `core/v1` Event carrying the same named reason, the
+   detail, and a pointer into `KUBERNETES-PARITY.md`, so `kubectl describe pod`
+   reports the node's own account instead of only the scheduler's. Events are
+   keyed to the state they describe and written once, with the stored object's
+   `count` bumped if that state is still true 30 minutes later; an ordinary
+   running Pod is not narrated. Filing an Event cannot fail the reconciliation
+   pass it follows, and a failed write is retried on the next pass rather than
+   remembered as already said.
 
 The ownership journal allows startup reconciliation to remove orphaned Macker
 containers and IP aliases after a daemon crash. Before stopping/removing a

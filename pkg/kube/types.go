@@ -55,3 +55,10 @@ type ContainerStateRunning = corev1.ContainerStateRunning
 type ContainerStateTerminated = corev1.ContainerStateTerminated
 type ContainerStatus = corev1.ContainerStatus
 type PodStatus = corev1.PodStatus
+
+// Event is the legacy core/v1 Event, which is what maclet writes: it is the form
+// `kubectl describe pod` aggregates, and its reason/message pair is what an
+// operator branches on without reading maclet's prose first.
+type Event = corev1.Event
+type EventSource = corev1.EventSource
+type ObjectReference = corev1.ObjectReference

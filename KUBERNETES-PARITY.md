@@ -175,11 +175,19 @@ of "cannot":
 | `MacletMissingNativeLabel` | `CreateContainerConfigError` | The Pod is bound to the node but maclet will never supervise it: it lacks `k8s-darwin.dev/native=true` |
 | `MacletMackerLaunchFailed` | `RunContainerError` | The node could not carry the Pod out — Macker failed to launch, or the host path was unreachable |
 
-Two gaps in this surface, stated rather than promised: maclet writes no `Event`
-objects, so `kubectl describe pod` shows only what the scheduler wrote, and the
-Ready condition reason is the generic `ContainersNotReady`. The named reasons
-above are greppable in `.status.reason` and in the waiting reason; the maclet
-reason strings are the same in both places plus the log.
+maclet files the same account as an `Event`, so `kubectl describe pod` shows the
+node's own line rather than only the scheduler's. Each Event carries maclet's reason
+in `.reason`, the detail plus a pointer to this section in `.message`, and
+`source.component=maclet` with `source.host` set to the node. They are deduplicated
+against the state they report: one Event per distinct `phase`/`reason`/`message`, with
+a `count` that rises if the state persists past 30 minutes, because reconciliation
+rewrites the same status every few seconds and an unthrottled writer would bury the
+line that matters. A refusal therefore appears once, with a stable name like
+`maclet.pending.unsupported.<pod>.<hash>`.
+
+One gap remains, stated rather than promised: the Ready condition reason is the generic
+`ContainersNotReady`. The named reasons above are greppable in `.status.reason`, in the
+waiting reason, in the Events, and in the maclet log.
 
 Before 2026-11-25 every refusal reported `RunContainerError`, which read as "the
 runtime crashed" and invited a retry loop rather than a manifest change, and an

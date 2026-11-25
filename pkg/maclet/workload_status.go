@@ -223,5 +223,10 @@ func (m *workloadManager) updateStatus(ctx context.Context, client *APIClient, p
 		return err
 	}
 	*pod = *updated
+	// The status write is the contract; the Event is the notice. Filing it after the
+	// write means an Event never describes a state the Pod does not have, and
+	// recordPodEvent swallows its own errors so an API hiccup on reporting cannot
+	// stop maclet supervising the workload.
+	m.recordPodEvent(ctx, client, pod, phase, reason, message)
 	return nil
 }

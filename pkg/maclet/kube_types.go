@@ -50,3 +50,8 @@ type ContainerStateRunning = kubeapi.ContainerStateRunning
 type ContainerStateTerminated = kubeapi.ContainerStateTerminated
 type ContainerStatus = kubeapi.ContainerStatus
 type PodStatus = kubeapi.PodStatus
+
+// Events are how maclet's account of a refusal reaches `kubectl describe pod`.
+type Event = kubeapi.Event
+type EventSource = kubeapi.EventSource
+type ObjectReference = kubeapi.ObjectReference
