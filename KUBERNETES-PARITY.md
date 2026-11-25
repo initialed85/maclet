@@ -79,6 +79,17 @@ that capability in two stages:
   Macker refused by the kernel look identical in a Pod's status, and only one of them is
   fixed by upgrading Macker. Macker reports its status both as a top-level `probe_status`
   and inside the `probe` record beside the mount facts; maclet reads either.
+- Carrying the runtime's `reason` verbatim is a deliberate inheritance, and its cost is
+  accuracy: whatever Macker says about the mechanism becomes maclet's stated cause in a
+  Pod's status. That is not hypothetical. The build deployed on this node (`dee408c`) states
+  that "this kernel does not register the null filesystem at all", measured false — the
+  registered name is `nullfs` and `mount(2)` as root answers `EPERM` for it — and a
+  read-only Pod filed on the node reproduces that sentence verbatim in its `Pending` status.
+  Macker corrected it from `7468fd2` onward, which is why the roll target is the pinned
+  descendant rather than the build already on the node. maclet does not rewrite a runtime's
+  mechanism claim: the runtime owns the mount path, and a maclet-side correction would put
+  two causes in one status message. What maclet does instead is keep its own measurements in
+  this document, so a runtime claim can be checked against something other than prose.
   Where neither subcommand exists (the answer comes back as usage text), maclet falls
   back to two checks of its own: whether `macker run --help` advertises the marker
   `HOST:CONTAINER[:ro]`, which is a contract/version check only, and whether this OS
