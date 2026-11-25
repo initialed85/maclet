@@ -151,15 +151,36 @@ func mackerHelpAdvertisesReadOnlyVolumes(help string) bool {
 	return strings.Contains(help, mackerReadOnlyVolumeMarker)
 }
 
-// mackerReadOnlyVerdict is what `macker volumes --format json` reports about the
-// node it runs on. The runtime owns the mount path, including a vendored helper
-// pointed at with MACKER_MOUNT_NULLFS, so where this answers, it wins over maclet's
-// own look at the platform.
+// mackerReadOnlyVerdict is what `macker volumes [--probe] --format json` reports
+// about the node it runs on. The runtime owns the mount path, including a vendored
+// helper pointed at with MACKER_MOUNT_NULLFS, so where this answers, it wins over
+// maclet's own look at the platform.
 type mackerReadOnlyVerdict struct {
 	ReadOnlySupported bool   `json:"read_only_supported"`
 	Mechanism         string `json:"mechanism"`
 	Reason            string `json:"reason"`
+	// Probed and ProbeStatus exist from Macker f61c2bb / 52338ec. ProbeStatus is the
+	// machine-readable verdict, and maclet branches on it rather than reading the
+	// reason sentence, which is prose aimed at whoever opens `kubectl describe pod`.
+	Probed      bool   `json:"probed"`
+	ProbeStatus string `json:"probe_status"`
+	// Guidance is Macker's node-operator checklist. It is long and technical, so
+	// maclet logs it and keeps it out of the Pod's status: the answer a Pod needs is
+	// `reason`, and a 900-character mount calibration essay is not decision-shaped.
+	Guidance string `json:"guidance"`
 }
+
+// Macker's probe outcomes, from `macker volumes --probe --format json`. The probe is
+// the strongest evidence available: it attempts a real temporary read-only mount and
+// a write inside it, so `enforced` cannot be produced by a helper merely being present.
+const (
+	mackerProbeEnforced   = "enforced"
+	mackerProbePrivilege  = "mount_not_attempted_privilege"
+	mackerProbeNotRequest = "not_requested"
+	// Anything else -- not_attempted_os, helper_unavailable, mount_refused,
+	// write_accepted, unmount_failed -- is the kernel or the runtime answering no, and
+	// maclet refuses :ro on that answer.
+)
 
 // parseMackerReadOnlyVerdict reads the JSON object out of a `macker volumes` answer.
 // A Macker that predates the subcommand prints usage text instead, which parses to

@@ -411,9 +411,14 @@ file content, use a `Directory` hostPath plus `subPath` and mount the file at
 its full destination (for example, `/usr/share/nginx/html/index.html`), or use
 a `File` hostPath without `subPath`. ConfigMap volumes are materialized into
 per-Pod state directories and support `items`, `defaultMode`, `binaryData`, and
-optional missing ConfigMaps. `readOnly` hostPath mounts are negotiated in two
-stages: maclet first asks the runtime, via `macker volumes --format json`
-(`read_only_supported`), which knows the mount path it will actually take --
+optional missing ConfigMaps. `readOnly` hostPath mounts are negotiated by asking the
+runtime, strongest evidence first: maclet runs `macker volumes --probe --format json`
+(Macker ≥ `f61c2bb`), which attempts a real temporary read-only mount and a write
+inside it and answers with a machine-readable `probe_status` (`enforced` is a yes;
+`mount_refused`, `write_accepted`, `helper_unavailable`, `not_attempted_os`,
+`unmount_failed` are no). `mount_not_attempted_privilege` says nothing about the
+kernel, so maclet falls back to the unproven verdict from `macker volumes --format
+json` (`read_only_supported`), which knows the mount path it will actually take --
 including a vendored helper named by `MACKER_MOUNT_NULLFS`. Where an older Macker
 cannot answer, maclet falls back to probing whether `macker run --help` advertises
 `HOST:CONTAINER[:ro]` (a contract/version check: a negative answer is re-probed

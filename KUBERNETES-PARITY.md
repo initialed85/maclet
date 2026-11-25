@@ -52,11 +52,20 @@ by mapping the directory with nullfs (`mount -t null -o ro`, or the
 inside the mount fail with `EROFS` for the workload process. maclet negotiates
 that capability in two stages:
 
-- maclet asks the installed Macker what it can enforce. `macker volumes --format
-  json` (Macker ≥ `4527b97`) is the authoritative per-node verdict — it is the
-  runtime's own answer about the mount path it will take, including a vendored
-  helper named by `MACKER_MOUNT_NULLFS`, which maclet cannot see from outside. Where
-  that subcommand does not exist (the answer comes back as usage text), maclet falls
+- maclet asks the installed Macker what it can enforce, strongest evidence first.
+  `macker volumes --probe --format json` (Macker ≥ `f61c2bb`, with `probe_status` from
+  `52338ec`) attempts a real temporary read-only mount and a write inside it, so its
+  `probe_status` is the only answer that cannot be produced by a mount helper merely
+  being present; maclet branches on that field rather than reading the prose. `enforced`
+  is a yes. `mount_refused`, `write_accepted` (mounted but still writable),
+  `helper_unavailable`, `not_attempted_os`, and `unmount_failed` are no, and Macker's
+  own `reason` is carried verbatim into the Pod's refusal. A probe that was never
+  allowed to mount (`mount_not_attempted_privilege`) says nothing about the kernel, so
+  maclet falls back to the unproven verdict from `macker volumes --format json` (Macker
+  ≥ `4527b97`), which is the runtime's own answer about the mount path it will take,
+  including a vendored helper named by `MACKER_MOUNT_NULLFS`. Macker's `guidance` field
+  is a node-operator checklist and is logged on the node, not put in a Pod's status.
+  Where neither subcommand exists (the answer comes back as usage text), maclet falls
   back to two checks of its own: whether `macker run --help` advertises the marker
   `HOST:CONTAINER[:ro]`, which is a contract/version check only, and whether this OS
   can make a read-only bind mount at all. The answer is cached; a negative answer is
@@ -300,17 +309,37 @@ on the declared port pretending to be the app. maclet therefore publishes nothin
 for a hostNetwork Pod and supplies `--env MACKER_PORT_N=<containerPort>` instead,
 which is what the declared port means on Linux.
 
-**Open item, measured 2026-11-25 on `icarus-2.local` (maclet `e7bd1e8`, Macker
-installed on the node):** the PodIP half of that chain did not hold during a
-re-check. A running container published `8080:31019/tcp` in `macker ps`, nginx was
-listening on `*:31019` and answered `200` on `127.0.0.1:31019`, but
-`curl http://<PodIP>:8080/` returned nothing and `pfctl -s Anchors` listed no
-`macker-*` anchors at all. maclet runs no `pfctl` (its privileged commands are
-`ifconfig`, `route`, `arp`, `mount_nfs`), so the redirect state is entirely
-Macker's; this is raised against Macker, and until it is settled **cluster
-Service traffic to a PodIP darwin workload is not dependable on this node** — the
-hostNetwork form above, which binds the declared port with no forwarding layer, is
-the path that measured correct (`*:8084` answered over the node address).
+**Corrected 2026-11-25, and the earlier version of this paragraph was wrong.** An
+earlier measurement here claimed the PodIP half of that chain had failed on
+`icarus-2.local` and advised holding Service-backed darwin rollouts. It was a
+measurement artifact, and the redirect has since been confirmed working on a
+maclet-supervised Pod. Two errors made it look broken:
+
+1. `pfctl -s Anchors` without `-vv` does not list the `com.apple/*` child anchors
+   Macker loads on macOS 26 — it showed no `macker-*` anchor while eleven were loaded
+   and carrying traffic, one of which was verified to do so with `Evaluations: 142`
+   from off-node attempts. Read the redirect state with `sudo macker ports
+   [--format json]` (Macker 55fa6d6+), which names each container's own anchor and
+   prints the kernel's `Evaluations`/`States` for its rule.
+2. A PodIP is aliased locally on the node (`route -n get <PodIP>` → interface `lo0`,
+   flags `LOCAL`), so traffic the node originates to its own PodIP is never evaluated
+   by PF at all. The same rule read `Evaluations: 0` under node-local attempts. A
+   node-local `curl http://<PodIP>:<port>/` proves nothing in either direction.
+
+Measured properly, on a Pod maclet supervises: `maclet-pf-check-long-name-abc-de`
+with `ports: [{containerPort: 8080}]`, PodIP `10.42.6.3`, requested from a workload Pod
+on a different host (source address `10.42.1.29`) —
+
+```console
+HTTP/1.1 404 Not Found
+Server: nginx/1.31.4
+```
+
+which is nginx's own answer on the container's allocated process port, reached through
+the redirect. **Service traffic to a PodIP darwin workload is dependable on this node
+and no rollout hold applies.** To check a node yourself, curl the PodIP from another
+host; the node-local form of the check is `127.0.0.1:<nodePort>`, which exercises the
+bind rather than the forwarding layer.
 
 That path also exposed a self-inflicted impossibility, measured on `icarus-2.local`
 the same day: the Kubernetes API server defaults `hostPort` to `containerPort`

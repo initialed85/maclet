@@ -285,16 +285,21 @@ mount the validated server/share beneath a journaled per-Pod path through the
 sudo-owned helper, and pass the mount (plus contained subPath) through the
 same mapping. NFS mounts are host-visible and Macker cannot enforce read-only
 semantics on the symlink mapping; lifecycle ownership is journaled so restart
-cleanup only unmounts paths maclet owns. The materialized files are writable
-copies unless the runtime and the OS can both enforce read-only volumes: maclet
-asks `macker volumes --format json` for the node verdict (`read_only_supported`),
-which knows the mount path Macker will take and any `MACKER_MOUNT_NULLFS` helper;
-where an older Macker cannot answer it falls back to the `HOST:CONTAINER[:ro]` usage
-marker (contract/version) plus its own look for nullfs (a helper, a `null.fs` mount
-bundle, or the `vfs.generic.nullfs` kernel feature), and only asks for a read-only
-mapping when the verdict is yes. Macker then enforces a node-wide read-only nullfs mount for
-the volume's lifetime (privileged, like PF and NFS). The second check matters
-because the marker is argument grammar, not a kernel measurement: macOS 26 /
+cleanup only unmounts paths maclet owns. The materialized files are writable copies
+unless the runtime can enforce read-only volumes. maclet asks in order of evidence:
+`macker volumes --probe --format json` (Macker ≥ `f61c2bb`) attempts a real temporary
+read-only mount and a write inside it and answers with `probe_status`, the only verdict
+that cannot be produced by a helper merely being present; `macker volumes --format json`
+(`read_only_supported`) gives the runtime's unproven verdict and is used where the probe
+does not exist or reported `mount_not_attempted_privilege`, which says nothing about the
+kernel; and where the installed Macker cannot answer at all, maclet falls back to the
+`HOST:CONTAINER[:ro]` usage marker (contract/version) plus its own look for nullfs (a
+helper, a `null.fs` mount bundle, or the `vfs.generic.nullfs` kernel feature). Macker's
+`reason` is carried verbatim into the Pod's refusal; its `guidance` field is a
+node-operator checklist, so maclet logs it and keeps it out of the Pod's status. Macker
+then enforces a node-wide read-only nullfs mount for the volume's lifetime (privileged,
+like PF and NFS). The fallbacks matter because the marker is argument grammar, not a
+kernel measurement: macOS 26 /
 Darwin 25.6 arm64 ships no nullfs, so there `readOnly` hostPath mounts are refused
 at admission rather than launched into a mount failure, and enforced read-only
 comes from a `readOnly` PersistentVolumeClaim mounted host-side with
@@ -333,11 +338,15 @@ a trusted-native node. Every reconciliation pass:
    maclet files a legacy `core/v1` Event carrying the same named reason, the
    detail, and a pointer into `KUBERNETES-PARITY.md`, so `kubectl describe pod`
    reports the node's own account instead of only the scheduler's. Events are
-   keyed to the state they describe and written once, with the stored object's
-   `count` bumped if that state is still true 30 minutes later; an ordinary
-   running Pod is not narrated. Filing an Event cannot fail the reconciliation
-   pass it follows, and a failed write is retried on the next pass rather than
-   remembered as already said.
+   keyed to the state they describe and written once, with `count` raised if that
+   state is still true 30 minutes later; the count is maclet's own tally merged in
+   with a patch, because NodeRestriction lets a node create and patch Events but not
+   read them back. An Event name always keeps the hash that distinguishes two states
+   of one Pod -- when the name will not fit in 63 characters it is the readable part
+   that is cut, otherwise two reports would collide on one object and one line would
+   be lost. An ordinary running Pod is not narrated. Filing an Event cannot fail the
+   reconciliation pass it follows, and a failed write is retried on the next pass
+   rather than remembered as already said.
 
 The ownership journal allows startup reconciliation to remove orphaned Macker
 containers and IP aliases after a daemon crash. Before stopping/removing a

@@ -860,3 +860,84 @@ func TestExplainUnlabelledPodReportsOnce(t *testing.T) {
 		t.Fatalf("status writes for a Running Pod = %d, want 1", got)
 	}
 }
+
+// TestReadOnlyCapabilityFollowsTheProbeLadder pins how maclet reads Macker's
+// `volumes --probe` answer. The probe is the only evidence that cannot be produced by
+// a mount helper merely being present, so it wins; a probe that was never allowed to
+// mount says nothing about the kernel and must not be read as a refusal.
+func TestReadOnlyCapabilityFollowsTheProbeLadder(t *testing.T) {
+	root := t.TempDir()
+	for _, tc := range []struct {
+		name        string
+		probe       string // what `volumes --probe --format json` answers
+		plain       string // what `volumes --format json` answers
+		wantSupport bool
+		wantDetail  string
+		wantAbsent  string
+	}{
+		{
+			name:  "enforced beats an unproven refusal",
+			probe: `{"read_only_supported":true,"mechanism":"mount_nullfs","probed":true,"probe_status":"enforced","reason":"a temporary read-only mount held: the kernel refused a write inside it"}`,
+			// The unproven verdict disagrees, and loses. A node that has proved
+			// enforcement in the kernel is not going to refuse Pods on an old guess.
+			plain:       `{"read_only_supported":false,"mechanism":"none","reason":"no helper resolved"}`,
+			wantSupport: true,
+			wantDetail:  "temporary read-only mount held",
+		},
+		{
+			name:        "privilege falls back to the unproven verdict",
+			probe:       `{"read_only_supported":false,"mechanism":"none","probed":true,"probe_status":"mount_not_attempted_privilege","reason":"nobody was allowed to mount"}`,
+			plain:       `{"read_only_supported":true,"mechanism":"mount_nullfs","reason":"helper present and the bundle exists"}`,
+			wantSupport: true,
+			wantDetail:  "helper present and the bundle exists",
+		},
+		{
+			name:       "a mount that stayed writable is refused",
+			probe:      `{"read_only_supported":false,"mechanism":"fstab_ro","probed":true,"probe_status":"write_accepted","reason":"the mount was accepted but a write inside it succeeded, so it is not read-only"}`,
+			plain:      `{"read_only_supported":true,"mechanism":"fstab_ro","reason":"looks fine"}`,
+			wantDetail: "write inside it succeeded",
+			wantAbsent: "looks fine",
+		},
+		{
+			name:       "not_attempted_os is a decision, not an unknown",
+			probe:      `{"read_only_supported":false,"mechanism":"none","probed":true,"probe_status":"not_attempted_os","reason":"this macOS has no null filesystem bundle at /Library/Filesystems/null.fs","guidance":"LONG NODE CHECKLIST that must not reach a Pod"}`,
+			wantDetail: "no null filesystem bundle",
+			// Macker's guidance is for whoever owns the node. A Pending Pod's status
+			// is read by whoever owns the workload.
+			wantAbsent: "LONG NODE CHECKLIST",
+		},
+		{
+			name:        "unmount_failed fails closed",
+			probe:       `{"read_only_supported":false,"mechanism":"mount_nullfs","probed":true,"probe_status":"unmount_failed","reason":"the read-only mount held but could not be released"}`,
+			plain:       `{"read_only_supported":true,"mechanism":"mount_nullfs","reason":"enforced elsewhere"}`,
+			wantDetail:  "could not be released",
+			wantSupport: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := filepath.Join(root, "macker-"+strings.ReplaceAll(tc.name, " ", "-"))
+			script := "#!/bin/sh\n" +
+				"if [ \"$1\" = volumes ] && [ \"$2\" = --probe ]; then cat <<'JSON'\n" + tc.probe + "\nJSON\nexit 0\nfi\n" +
+				"if [ \"$1\" = volumes ]; then cat <<'JSON'\n" + tc.plain + "\nJSON\nexit 0\nfi\n" +
+				"echo '    \thost path and container path, HOST:CONTAINER[:ro] (repeatable)'\nexit 2\n"
+			if err := os.WriteFile(fake, []byte(script), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			manager := newWorkloadManager(nil, fake, "")
+			got := manager.supportsReadOnlyVolumes()
+			if got != tc.wantSupport {
+				t.Errorf("supportsReadOnlyVolumes() = %t, want %t", got, tc.wantSupport)
+			}
+			detail := manager.readOnlyVolumesRefusalDetail()
+			if tc.wantSupport {
+				return
+			}
+			if !strings.Contains(detail, tc.wantDetail) {
+				t.Errorf("refusal detail = %q, want it to carry %q", detail, tc.wantDetail)
+			}
+			if tc.wantAbsent != "" && strings.Contains(detail, tc.wantAbsent) {
+				t.Errorf("refusal detail = %q, should not carry %q", detail, tc.wantAbsent)
+			}
+		})
+	}
+}
