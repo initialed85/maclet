@@ -95,6 +95,26 @@ func cleanupTerminatingPods(ctx context.Context, client *APIClient, nodeName, na
 	return cleanupPodList(ctx, client, pods, nodeName, staleAfter, now)
 }
 
+// finishPodDeletion removes the Pod object once maclet has stopped its workload and
+// reported a terminal phase, which is the order kubelet uses. The caller decides whether
+// the Pod is being deleted; this does not re-read the timestamp, because updateStatus
+// replaces the local object with the API's status reply. 404 is success, because the
+// object is already gone by definition. This is the fast path; the stale-window sweeper
+// below stays as the backstop for Pods maclet never saw.
+func (m *workloadManager) finishPodDeletion(ctx context.Context, client *APIClient, pod *Pod) error {
+	if _, err := client.Delete(ctx, podPath(*pod)+"?gracePeriodSeconds=0"); err != nil {
+		var apiErr *HTTPError
+		if errors.As(err, &apiErr) && apiErr.Code == http.StatusNotFound {
+			return nil
+		}
+		return err
+	}
+	if m.debug {
+		log.Printf("debug: acknowledged deletion of Pod %s/%s and removed the object", pod.ObjectMeta.Namespace, pod.ObjectMeta.Name)
+	}
+	return nil
+}
+
 func cleanupTerminatingPodsClusterWide(ctx context.Context, client *APIClient, nodeName string, staleAfter time.Duration, now time.Time) (int, error) {
 	query := url.Values{
 		"fieldSelector": []string{"spec.nodeName=" + nodeName},

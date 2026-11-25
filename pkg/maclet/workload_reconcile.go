@@ -108,7 +108,11 @@ func (m *workloadManager) reconcile(ctx context.Context, client *APIClient, pods
 		}
 		if pod.ObjectMeta.DeletionTimestamp != nil {
 			seen[uid] = true
+			deletionStamp := pod.ObjectMeta.DeletionTimestamp
 			workload := m.workloads[uid]
+			// Whether maclet ever ran this workload decides what the acknowledgement can
+			// honestly say: "stopped" is true only for something it started.
+			wasAdopted := workload != nil
 			if workload == nil {
 				workload = &managedWorkload{
 					UID:              uid,
@@ -130,12 +134,30 @@ func (m *workloadManager) reconcile(ctx context.Context, client *APIClient, pods
 				reconcileErrors = append(reconcileErrors, fmt.Errorf("persist deleted Pod %s/%s cleanup: %w", pod.ObjectMeta.Namespace, pod.ObjectMeta.Name, err))
 			}
 			// A real kubelet reports the workload terminal before the API server
-			// finishes a graceful Pod deletion. Without that acknowledgement,
-			// deleting a native Pod can leave it stuck in Terminating forever.
-			if err := m.updateStatus(ctx, client, pod, "Failed", pod.Status.PodIP, "MacletWorkloadDeleted", "maclet stopped the native workload for Pod deletion", false, workload.RestartCount); err != nil {
+			// finishes a graceful Pod deletion. Without that acknowledgement, deleting
+			// a native Pod can leave it stuck in Terminating forever.
+			ackMessage := "maclet never ran this Pod; its deletion is acknowledged here because nothing else on a darwin node can finish it"
+			if wasAdopted {
+				ackMessage = "maclet stopped the native workload for Pod deletion"
+			}
+			statusErr := m.updateStatus(ctx, client, pod, "Failed", pod.Status.PodIP, "MacletWorkloadDeleted", ackMessage, false, workload.RestartCount)
+			if statusErr != nil {
 				var apiErr *HTTPError
-				if !errors.As(err, &apiErr) || apiErr.Code != http.StatusNotFound {
-					reconcileErrors = append(reconcileErrors, err)
+				if !errors.As(statusErr, &apiErr) || apiErr.Code != http.StatusNotFound {
+					reconcileErrors = append(reconcileErrors, statusErr)
+				}
+			}
+			// kubelet does not stop at reporting a terminal phase: once the workload is
+			// gone it deletes the Pod object. Doing the same here bounds a teardown by
+			// one reconcile pass instead of by the backstop sweeper's stale window, which
+			// on this node is 45s -- long enough that a Deployment with several generations
+			// still has ReplicaSets creating Pods while their predecessors wait to be swept.
+			// The timestamp is the one read from the list, captured before updateStatus,
+			// because that call replaces the local Pod with the API's response and a status
+			// subresource reply is not required to repeat the deletion timestamp back.
+			if deletionStamp != nil {
+				if err := m.finishPodDeletion(ctx, client, pod); err != nil {
+					reconcileErrors = append(reconcileErrors, fmt.Errorf("finish deleted Pod %s/%s: %w", pod.ObjectMeta.Namespace, pod.ObjectMeta.Name, err))
 				}
 			}
 			continue
