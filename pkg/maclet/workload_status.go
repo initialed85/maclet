@@ -52,11 +52,19 @@ func desiredPodStatus(pod Pod, nodeIP, phase, ip, reason, message string, runnin
 		status.PodIPs = []PodIP{{IP: ip}}
 	}
 	status.HostIP = nodeIP
-	// PodStatus.reason is optional and has no Maclet-specific value. Leaving it
-	// empty lets clients and kubectl use the canonical Pod phase (Running,
-	// Pending, Succeeded, or Failed) for the top-level status. The native
-	// workload identity is already carried by the Pod label and annotations.
+	// PodStatus.reason carries maclet's own named reason while a Pod sits Pending.
+	// The phase stays canonical (Running, Pending, Succeeded, Failed), and for
+	// those states the reason is left empty. It is filled in only for Pending,
+	// because that is the state where "why is this Pod stuck" has to be answered,
+	// and Kubernetes gives a node agent no other machine-readable field for it:
+	// the kubelet vocabulary in the container waiting state is a fixed small set,
+	// so a client that branches on reasons would otherwise have to parse message
+	// prose. This is the field `kubectl get pod -o jsonpath={.status.reason}`
+	// reads, and it is the one KUBERNETES-PARITY.md promises.
 	status.Reason = ""
+	if phase == "Pending" && reason != "" {
+		status.Reason = reason
+	}
 	status.Message = message
 	stamp := metav1.NewTime(time.Now().UTC())
 	ready := running && phase == "Running"
@@ -115,7 +123,9 @@ func desiredPodStatus(pod Pod, nodeIP, phase, ip, reason, message string, runnin
 	default:
 		waitingReason := "ContainerCreating"
 		switch reason {
-		case "MacletUnsupportedPod":
+		case "MacletUnsupportedPod", "MacletMissingNativeLabel":
+			// "This manifest is not runnable on this node class" is a configuration
+			// problem. ContainerCreating would claim maclet is still working on it.
 			waitingReason = "CreateContainerConfigError"
 		case "MacletMackerLaunchFailed":
 			waitingReason = "RunContainerError"

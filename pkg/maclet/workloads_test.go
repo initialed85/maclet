@@ -457,8 +457,11 @@ func TestDesiredPodStatus(t *testing.T) {
 func TestDesiredPodStatusUsesStandardPendingReasons(t *testing.T) {
 	pod := Pod{Spec: PodSpec{Containers: []ContainerSpec{{Name: "web", Image: "example/web:latest"}}}}
 	status := desiredPodStatus(pod, "192.168.137.111", "Pending", "10.42.8.3", "MacletUnsupportedPod", "unsupported configuration", false, 0)
-	if status.Reason != "" {
-		t.Fatalf("Pod status reason = %q, want empty", status.Reason)
+	// A Pending Pod must name its reason somewhere a client can branch on, and
+	// that field is PodStatus.reason. The container waiting state stays inside
+	// the kubelet vocabulary so standard tooling still recognises it.
+	if status.Reason != "MacletUnsupportedPod" {
+		t.Fatalf("Pod status reason = %q, want MacletUnsupportedPod", status.Reason)
 	}
 	if waiting := status.ContainerStatuses[0].State.Waiting; waiting == nil || waiting.Reason != "CreateContainerConfigError" {
 		t.Fatalf("waiting status = %#v", status.ContainerStatuses[0].State.Waiting)
@@ -467,6 +470,23 @@ func TestDesiredPodStatusUsesStandardPendingReasons(t *testing.T) {
 		if (condition.Type == "Ready" || condition.Type == "ContainersReady") && (condition.Status != "False" || condition.Reason != "ContainersNotReady") {
 			t.Fatalf("not-ready condition = %#v", condition)
 		}
+	}
+
+	// A Pod maclet will never supervise is a manifest problem, not progress.
+	// Before this it inherited the default ContainerCreating, which claims maclet
+	// is still working on a Pod that is only ever going to sit Pending.
+	unlabelled := desiredPodStatus(pod, "192.168.137.111", "Pending", "", "MacletMissingNativeLabel", unlabelledPendingMessage, false, 0)
+	if unlabelled.Reason != "MacletMissingNativeLabel" {
+		t.Fatalf("unlabelled Pod reason = %q", unlabelled.Reason)
+	}
+	if waiting := unlabelled.ContainerStatuses[0].State.Waiting; waiting == nil || waiting.Reason != "CreateContainerConfigError" {
+		t.Fatalf("unlabelled Pod waiting status = %#v, want CreateContainerConfigError", unlabelled.ContainerStatuses[0].State.Waiting)
+	}
+
+	// A running workload keeps the canonical empty reason and no waiting state.
+	running := desiredPodStatus(pod, "192.168.137.111", "Running", "10.42.8.3", "MacletWorkloadRunning", "running", true, 0)
+	if running.Reason != "" || running.ContainerStatuses[0].State.Waiting != nil {
+		t.Fatalf("running Pod = reason %q waiting %#v", running.Reason, running.ContainerStatuses[0].State.Waiting)
 	}
 }
 

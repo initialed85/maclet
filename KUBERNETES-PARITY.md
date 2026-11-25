@@ -106,17 +106,30 @@ what a Linux reader assumes:
 
 ## How a refusal surfaces
 
-A Pod a maclet node cannot run stays `Pending`. `spec.reason` on the Pod is left
-empty by design (the phase is canonical); the detail is on the first container's
-waiting state, and it distinguishes the two kinds of "cannot":
+A Pod a maclet node cannot run stays `Pending`. While a Pod is `Pending`,
+`.status.reason` carries maclet's own named reason, which is what a client should
+branch on (`kubectl get pod -o jsonpath='{.status.reason}'`). For `Running`,
+`Succeeded`, and `Failed` the field is left empty, as Kubernetes expects, and the
+canonical phase carries the state. The detail is on the first container's waiting
+state, which stays inside the kubelet vocabulary and distinguishes the two kinds
+of "cannot":
 
-| Waiting reason | Meaning | maclet internal reason |
+| `.status.reason` while Pending | Waiting reason | Meaning |
 | --- | --- | --- |
-| `CreateContainerConfigError` | The **manifest** asks for something this node class refuses — a policy decision, retrying will not help | `MacletUnsupportedPod` |
-| `RunContainerError` | The node could not carry the Pod out — Macker failed to launch, or the host path was unreachable | `MacletMackerLaunchFailed` |
+| `MacletUnsupportedPod` | `CreateContainerConfigError` | The **manifest** asks for something this node class refuses — a policy decision, retrying will not help |
+| `MacletMissingNativeLabel` | `CreateContainerConfigError` | The Pod is bound to the node but maclet will never supervise it: it lacks `k8s-darwin.dev/native=true` |
+| `MacletMackerLaunchFailed` | `RunContainerError` | The node could not carry the Pod out — Macker failed to launch, or the host path was unreachable |
 
-Before 2026-11-25 both were reported as `RunContainerError`, which read as "the
-runtime crashed" and invited a retry loop rather than a manifest change.
+Two gaps in this surface, stated rather than promised: maclet writes no `Event`
+objects, so `kubectl describe pod` shows only what the scheduler wrote, and the
+Ready condition reason is the generic `ContainersNotReady`. The named reasons
+above are greppable in `.status.reason` and in the waiting reason; the maclet
+reason strings are the same in both places plus the log.
+
+Before 2026-11-25 every refusal reported `RunContainerError`, which read as "the
+runtime crashed" and invited a retry loop rather than a manifest change, and an
+unlabelled Pod inherited `ContainerCreating` — which claimed maclet was still
+working on a Pod it had never intended to run.
 
 Measured on `icarus-2.local` on 2026-11-25, from the node's own status message:
 
