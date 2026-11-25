@@ -109,6 +109,10 @@ type workloadManager struct {
 	// readOnlyGuidanceLogged holds the last Macker `guidance` paragraph maclet wrote to
 	// the node log, so the same checklist is not repeated on every capability re-probe.
 	readOnlyGuidanceLogged string
+	// readOnlyFalsifiedLogged holds the last reason maclet published while knowing one
+	// of its claims to be false, so the warning about it is written once per distinct
+	// reason rather than on every five-minute re-probe.
+	readOnlyFalsifiedLogged string
 	// readOnlyVolumesNodeRejected records that Macker advertised the read-only
 	// volume marker but a launch still failed on the mount itself. It is sticky
 	// until the Macker binary changes, so maclet refuses readOnly volumes at
@@ -169,6 +173,7 @@ func (m *workloadManager) supportsReadOnlyVolumes() bool {
 	// to probe and a Macker that probed and was refused by the kernel both leave Pods Pending
 	// with a read-only refusal, and only one of them is fixed by upgrading Macker.
 	log.Printf("macker read-only volume capability for this node: supported=%t, answered by %s", supported, answeredBy)
+	m.logFalsifiedReadOnlyReason(reason)
 	if m.debug {
 		log.Printf("debug: Macker read-only volume support detected: %t (from runtime probe: %t)", supported, decidedByRuntime)
 	}
@@ -293,6 +298,61 @@ func (m *workloadManager) logMackerReadOnlyGuidance(guidance string) {
 	}
 	m.readOnlyGuidanceLogged = guidance
 	log.Printf("macker read-only volume guidance for this node: %s", guidance)
+	// The same honesty check applies to the operator checklist: Macker builds 35 and 36
+	// (7468fd2, da1138e) published "errno 19 on Darwin is ENOTSUP" here, and maclet copies
+	// that text to the node log verbatim.
+	m.logFalsifiedReadOnlyReason(guidance)
+}
+
+// mackerReadOnlyFalsifiedClaims are fragments maclet has published inside a Pod's status on
+// the strength of a Macker `reason`, and has since falsified by measurement or by Apple's own
+// source. maclet copies `reason` verbatim because the runtime is the authority on its own mount
+// path, and that contract means maclet also inherits its accuracy -- so a node running an old
+// Macker tells operators something untrue that maclet's own parity document has corrected.
+//
+// The refusal is still correct: on this OS no Macker build can enforce a read-only hostPath
+// mount, whichever sentence names the reason. So maclet does not rewrite the runtime's text --
+// silently editing a runtime's explanation would make the Pod's status uncheckable against any
+// binary -- it publishes the refusal and says plainly on the node, where an operator looking at
+// the runtime looks for it, that the mechanism named in the message is wrong and what replaced
+// it. Nothing here ever enters a Pod's status or an Event.
+var mackerReadOnlyFalsifiedClaims = []struct {
+	fragment string
+	instead  string
+}{
+	{
+		fragment: "does not register the null filesystem",
+		instead:  "the kernel does register it, under the type name nullfs: mount(2) for nullfs returns EPERM even as root because xnu's nullfs_mount() requires the private entitlement com.apple.private.nullfs_allow and has no superuser fallback",
+	},
+	{
+		fragment: "registers no nullfs",
+		instead:  "nullfs is registered and refuses on entitlement (EPERM at the mount entry point), which is why no helper can mount it rather than nothing being there to mount",
+	},
+	{
+		fragment: "removed nullfs",
+		instead:  "nullfs was not removed; it is present in this kernel and gated behind com.apple.private.nullfs_allow",
+	},
+	{
+		fragment: "errno 19 on Darwin is ENOTSUP",
+		instead:  "errno 19 is ENODEV on both Darwin and Linux (Apple's bsd/sys/errno.h comments it \"operation not supported by device\"); ENOTSUP is 45 on Darwin and 95 on Linux",
+	},
+}
+
+// logFalsifiedReadOnlyReason names any claim in the reason about to be published that maclet
+// knows to be wrong. It logs once per distinct reason, because a negative capability answer is
+// re-probed every five minutes so that a Macker upgrade heals the node without a restart.
+func (m *workloadManager) logFalsifiedReadOnlyReason(reason string) {
+	if reason == "" || reason == m.readOnlyFalsifiedLogged {
+		return
+	}
+	for _, claim := range mackerReadOnlyFalsifiedClaims {
+		if !strings.Contains(reason, claim.fragment) {
+			continue
+		}
+		m.readOnlyFalsifiedLogged = reason
+		log.Printf("the read-only refusal maclet is publishing on this node repeats a claim the runtime's reason states that maclet has since falsified: %q is wrong -- %s. The refusal itself stands; upgrade Macker so the Pod's status names the real mechanism (macker ff7b159 onward, and this node's own message is checked against macker's guidance text)",
+			claim.fragment, claim.instead)
+	}
 }
 
 // readOnlyProbeRefusal words a probe answer that says no. Macker's own reason is the

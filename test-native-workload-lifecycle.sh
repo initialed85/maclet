@@ -401,6 +401,20 @@ if [[ "$MACLET_TEST_READ_ONLY" == "true" ]]; then
       echo "refusal reason names no mechanism, so an honest refusal is indistinguishable from a bug here: $RO_REFUSAL_MESSAGE" >&2
       exit 1
     fi
+    # The check above is a positive match, and a positive match alone is not enough: a reason
+    # that names a mechanism which does not exist passes it. macker build-33 (dee408c) does
+    # exactly that today, publishing "this kernel does not register the null filesystem at
+    # all" into every refused :ro Pod's status -- nullfs IS registered, and answers EPERM at
+    # an entitlement gate root cannot open. So a green stage would have been reporting an
+    # honest node that was telling operators something maclet's own parity document
+    # contradicts. Fail on the known-false claims instead, which makes this stage evidence
+    # about truth rather than only about shape. It is expected to fail on a node running
+    # macker before ff7b159 and to pass on build-38 (866c98f) onward: that is the defect, not
+    # a flake, and the refusal it grades is itself correct in both cases.
+    if grep -qiE 'does not register|registers no|nullfs (is |was )?removed|removed nullfs|no nullfs (vfs|filesystem)( |,|$)|errno 19 on Darwin is ENOTSUP' <<<"$RO_REFUSAL_MESSAGE"; then
+      echo "refusal reason asserts a mechanism maclet has falsified, so this node is publishing an untrue cause to Pods (upgrade macker to ff7b159 or later): $RO_REFUSAL_MESSAGE" >&2
+      exit 1
+    fi
     echo "node cannot enforce read-only hostPath mounts: :ro Pods refused at admission, as designed"
     echo "  refusal reason: $(tr -d '\n' <<<"$RO_REFUSAL_MESSAGE" | cut -c1-170)"
   else

@@ -241,7 +241,19 @@ refused Pod and fails if that text describes a mount that *accepted writes*, bec
 runtime refused honestly" and "the runtime failed to enforce" are the same visible outcome
 at admission and only the reason distinguishes them -- and it fails if no Pod carrying a
 `readOnly` mount reached the node at all, so a manifest that silently did not apply cannot
-pass. On a node whose macOS does provide a usable read-only bind mount, the same stage
+pass. The check on the reason text is deliberately two-sided. A positive match alone -- "the
+reason names some mechanism" -- is satisfiable by a mechanism that does not exist, and that is
+not a hypothetical: macker build-33 (`dee408c`) publishes "this kernel does not register the
+null filesystem at all" into every refused `:ro` Pod's status on a node where `nullfs` *is*
+registered and answers `EPERM` at an entitlement gate. So the stage also fails on the claims
+maclet has falsified, verified against the two builds' own text rather than against a guess:
+`dee408c`'s reason trips the negative assertion and `866c98f`'s does not. That makes a red stage
+on an unrolled node the expected result, and it is what turns "stage green" into evidence about
+truth instead of only about shape. maclet's own runtime path mirrors the concern without editing
+any Pod: `logFalsifiedReadOnlyReason` says on the node log that a published claim is false and
+what replaced it, and the refusal text itself stays verbatim, because silently rewriting a
+runtime's explanation would make a Pod's status uncheckable against the binary that produced it.
+On a node whose macOS does provide a usable read-only bind mount, the same stage
 exercises the enforcement path unchanged: the Pod runs, its writes fail, and it never
 becomes Ready.
 

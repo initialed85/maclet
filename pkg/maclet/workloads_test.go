@@ -989,6 +989,50 @@ func TestMackerReadOnlyGuidanceIsLoggedOncePerParagraph(t *testing.T) {
 	}
 }
 
+// maclet publishes a runtime's `reason` verbatim, which means it also publishes that
+// runtime's errors. Build-33 (dee408c) tells a refused Pod that the kernel "does not register
+// the null filesystem at all", a claim maclet has since falsified twice over -- by mount(2)
+// measurement on the node and by reading xnu's own nullfs_mount(). The refusal is still right,
+// so maclet must not rewrite the message; it warns on the node instead, once per distinct
+// reason, and stays quiet on a Macker whose text is already honest (build-38, 866c98f), so the
+// warning cannot become a second stream of noise an operator learns to skip.
+func TestFalsifiedReadOnlyClaimWarnsWithoutRewritingTheReason(t *testing.T) {
+	var logged bytes.Buffer
+	previous := log.Writer()
+	log.SetOutput(&logged)
+	defer log.SetOutput(previous)
+
+	manager := &workloadManager{}
+	falseReason := "this macOS has no null filesystem bundle at /Library/Filesystems/null.fs, " +
+		"so no mount helper exists; a calibrated mount(2) probe shows this kernel does not register " +
+		"the null filesystem at all, so no helper can mount it here. Run this workload without :ro"
+	honestReason := "this macOS ships no null filesystem bundle (looked for a bundle named null.fs " +
+		"under /Library/Filesystems) and no mount_nullfs helper exists, and mount(2) as root draws " +
+		"EPERM for the type nullfs because Apple gates that mount entry point behind a private " +
+		"entitlement no third-party helper can hold. Run this workload without :ro"
+
+	manager.logFalsifiedReadOnlyReason(falseReason)
+	manager.logFalsifiedReadOnlyReason(falseReason)
+	manager.logFalsifiedReadOnlyReason(honestReason)
+
+	output := logged.String()
+	if count := strings.Count(output, "falsified"); count != 1 {
+		t.Errorf("falsified-claim warning logged %d times, want exactly 1: %s", count, output)
+	}
+	if !strings.Contains(output, "does not register the null filesystem") {
+		t.Errorf("warning = %q, want it to name the claim it is contradicting", output)
+	}
+	if !strings.Contains(output, "com.apple.private.nullfs_allow") {
+		t.Errorf("warning = %q, want it to carry the mechanism that replaced the false claim", output)
+	}
+
+	// The contract that matters: the published reason is untouched, verbatim, including
+	// the false sentence. maclet contradicts it on the node and never in the Pod.
+	if got := manager.readOnlyProbeRefusal(mackerReadOnlyVerdict{Reason: falseReason}); got != falseReason {
+		t.Errorf("refusal = %q, want Macker's reason passed through verbatim even when maclet knows better", got)
+	}
+}
+
 // Two negative answers look the same in a Pod's status and mean opposite things to the
 // person holding the node: a Macker too old to probe is fixed by upgrading Macker, and a
 // Macker that probed and was refused by the kernel is not. maclet logs which evidence
