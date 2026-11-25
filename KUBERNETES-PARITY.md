@@ -56,7 +56,10 @@ that capability in two stages:
   `macker volumes --probe --format json` (Macker ≥ `f61c2bb`, with `probe_status` from
   `52338ec`) attempts a real temporary read-only mount and a write inside it, so its
   `probe_status` is the only answer that cannot be produced by a mount helper merely
-  being present; maclet branches on that field rather than reading the prose. `enforced`
+  being present; maclet branches on that field rather than reading the prose. Because the
+  probe performs a real mount it needs root or passwordless sudo, and it inherits maclet's
+  privilege rather than escalating -- on this node maclet is a root launchd daemon, so the
+  probe is attempted. `enforced`
   is a yes. `mount_refused`, `write_accepted` (mounted but still writable),
   `helper_unavailable`, `not_attempted_os`, and `unmount_failed` are no, and Macker's
   own `reason` is carried verbatim into the Pod's refusal. A probe that was never
