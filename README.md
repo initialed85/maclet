@@ -434,7 +434,9 @@ that cannot enforce `:ro` at all, a
 `readOnly` hostPath mount and any `subPathExpr` mount are rejected rather than
 silently run writable; ConfigMap read-only mounts are accepted and stay trusted
 writable copies until `:ro` is available. Read-only mounts need root or
-passwordless `sudo` on the node, as the PF and NFS paths do. See `KUBERNETES-PARITY.md` for the
+passwordless `sudo` on the node for the host-side `mount_nfs` path; the nullfs
+mapping itself is performed by Macker, as all port forwarding is — maclet runs no
+`pfctl`. See `KUBERNETES-PARITY.md` for the
 full list of what a maclet node guarantees and what it knowingly does differently. Multiple containers,
 unsupported volume sources, `valueFrom: resourceFieldRef`, and `hostPort`
 mappings are also rejected. An absolute `workingDir` is passed to Macker and

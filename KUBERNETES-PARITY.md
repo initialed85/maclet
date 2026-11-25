@@ -105,8 +105,9 @@ not what a Linux reader assumes:
 - Read-only mounts need root or passwordless `sudo` **at mount time**. That is not
   the constraint on this node class: the node grants `(ALL) NOPASSWD: ALL` to the
   maclet user, and maclet execs Macker directly as its own user (only the commands
-  *maclet* runs itself — `ifconfig`, `route`, `arp`, `mount_nfs`, PF — go through
-  `sudo -n`). An earlier version of this document blamed the service `PATH` for
+  *maclet* runs itself — `ifconfig`, `route`, `arp`, `mount_nfs` — go through
+  `sudo -n`; port forwarding is installed by Macker, not maclet. An earlier
+  version of this document blamed the service `PATH` for
   lacking `/sbin`; that was wrong, Macker resolves the helper by absolute path
   first. The real gap is the OS missing nullfs, measured above.
 - The nullfs mount is per mount point inside that container's rootfs and
@@ -130,7 +131,7 @@ not what a Linux reader assumes:
 | Pod label `k8s-darwin.dev/native=true` | **Required to be run.** maclet only supervises Pods carrying this label. An unlabelled Pod bound to the node is reported `Pending` with reason `MacletMissingNativeLabel` and a message naming the label, instead of sitting unexplained forever |
 | `spec.containers` | Exactly one. Sidecars are refused (`MacletUnsupportedPod`) |
 | `spec.initContainers` | Not executed, and not refused — see rule 4. Do not rely on an init container for ordering or setup here |
-| `spec.hostNetwork` | Supported with `dnsPolicy: ClusterFirstWithHostNet`; other host-network DNS policies stay `Pending`. The container binds its declared port on the host directly, exactly as on Linux — no PF mapping is installed |
+| `spec.hostNetwork` | Supported with `dnsPolicy: ClusterFirstWithHostNet`; other host-network DNS policies stay `Pending`. The container binds its declared port on the host directly, exactly as on Linux — no Macker port-forward is installed. Verified on `icarus-2.local` 2026-11-25: a hostNetwork nginx declaring `containerPort: 8084` listened on `*:8084` and answered over the node address |
 | `spec.os`, `nodeOS` affinity | The node reports `darwin`; the cluster scheduler decides, maclet does not validate image platforms |
 | Image platform | Darwin-native Mach-O images only. A `linux/amd64` manifest (e.g. `busybox:1.36`) fails in Macker with an OS mismatch and the Pod stays `Pending`. Build a Darwin image (see the `macgrubernetes`/Macker `Mackerfile` workflow) or schedule on a Linux node |
 | `ports[].containerPort` | **Required, not informational** on this node class — see "Ports and Macker config tokens". A PodIP workload becomes `-p CONTAINER:auto/tcp` (PodIP + PF remapping); a hostNetwork workload binds the declared port directly |
@@ -265,6 +266,18 @@ allocated 30000-32767 port instead of the port the Pod declared, and PF would si
 on the declared port pretending to be the app. maclet therefore publishes nothing
 for a hostNetwork Pod and supplies `--env MACKER_PORT_N=<containerPort>` instead,
 which is what the declared port means on Linux.
+
+**Open item, measured 2026-11-25 on `icarus-2.local` (maclet `e7bd1e8`, Macker
+installed on the node):** the PodIP half of that chain did not hold during a
+re-check. A running container published `8080:31019/tcp` in `macker ps`, nginx was
+listening on `*:31019` and answered `200` on `127.0.0.1:31019`, but
+`curl http://<PodIP>:8080/` returned nothing and `pfctl -s Anchors` listed no
+`macker-*` anchors at all. maclet runs no `pfctl` (its privileged commands are
+`ifconfig`, `route`, `arp`, `mount_nfs`), so the redirect state is entirely
+Macker's; this is raised against Macker, and until it is settled **cluster
+Service traffic to a PodIP darwin workload is not dependable on this node** — the
+hostNetwork form above, which binds the declared port with no forwarding layer, is
+the path that measured correct (`*:8084` answered over the node address).
 
 That path also exposed a self-inflicted impossibility, measured on `icarus-2.local`
 the same day: the Kubernetes API server defaults `hostPort` to `containerPort`
