@@ -110,6 +110,7 @@ not what a Linux reader assumes:
 | `spec.hostNetwork` | Supported with `dnsPolicy: ClusterFirstWithHostNet`; other host-network DNS policies stay `Pending` |
 | `spec.os`, `nodeOS` affinity | The node reports `darwin`; the cluster scheduler decides, maclet does not validate image platforms |
 | Image platform | Darwin-native Mach-O images only. A `linux/amd64` manifest (e.g. `busybox:1.36`) fails in Macker with an OS mismatch and the Pod stays `Pending`. Build a Darwin image (see the `macgrubernetes`/Macker `Mackerfile` workflow) or schedule on a Linux node |
+| `ports[].containerPort` | Published as `-p CONTAINER:auto/tcp` with PodIP + PF remapping. **Required, not informational** on this node class — see "Ports and Macker config tokens" |
 | `ports[].hostPort` | Refused; PodIP port remapping through PF is the model |
 | `livenessProbe`, `readinessProbe`, `startupProbe` | Not enforced (rule 4). `Ready` reflects "Macker reports the process running", nothing more |
 | `resources` | Not enforced. The node advertises the host machine |
@@ -160,6 +161,16 @@ That is the stance working as intended on a half-upgraded node: maclet forwarded
 perform the mount, and the Pod stayed `Pending` — it was never run with the
 sensitive tree writable. The fix is in the runtime, not the manifest.
 
+**Status of the read-only guarantee as of 2026-11-25, stated honestly:** the
+maclet half is verified on real hardware — `readOnly` reaches Macker as
+`-v HOST:CONTAINER:ro` and a non-readOnly mount stays the plain two-field form.
+The kernel-enforcement half (`EROFS` inside the mount) has **never** been
+observed on a maclet node, because the Macker build on `icarus-2.local`
+(`de5a5d3`) predates macker `220aa0f`, which resolves the nullfs helper by
+absolute path. Read "directory `readOnly` is honoured" as *maclet asks for it and
+the runtime refuses to lie*, not as *tested end to end on Darwin*. The inversion
+pair in the next section is the test that closes it.
+
 ## Volume sources
 
 | Source | On a maclet node |
@@ -172,6 +183,37 @@ sensitive tree writable. The fix is in the runtime, not the manifest.
 | `emptyDir`, `secret`, `downwardAPI`, `projected`, `csi`, ... | Refused when mounted: "volume ... is not a supported hostPath volume" |
 | `subPath` | Supported, contained; a `subPath` that escapes the `hostPath` (including through a symlink) is refused |
 | Single-file content mounts | Use a `Directory` `hostPath` plus `subPath` and mount the full destination path, or a `File` `hostPath` without `subPath` |
+
+## Ports and Macker config tokens
+
+In ordinary Kubernetes `spec.containers[].ports` is informational: a container
+that listens on 8080 works whether or not the manifest declares it, and the only
+field with functional effect is `hostPort`. On a maclet node that is not true.
+
+Macker fills `____MACKER_PORT_N____` tokens in image config files from the
+published ports **in `-p` order** — the first `-p` supplies `MACKER_PORT_1`, and
+so on — and it refuses to start a workload whose rootfs contains a token with no
+published port behind it:
+
+```console
+error: configure container rootfs: substitute .../rootfs/etc/nginx/nginx.conf:
+  token ____MACKER_PORT_1____ has no runtime value
+```
+
+maclet publishes one `-p` per declared `ports[]` entry and cannot invent more: it
+does not read the image rootfs, and guessing which port a token wants would
+break rule 2 by running a workload on a mapping nobody asked for. So on this node
+class **an image with config tokens needs its ports declared**, and a Pod that
+omits `ports:` is refused rather than started half-configured.
+
+Measured 2026-11-25 on `icarus-2.local`, three Pods, same image
+(`initialed85/nginx:latest`), same builds, only the manifest varying:
+
+| Pod | Result |
+| --- | --- |
+| `ports: [{containerPort: 8080}]`, writable `hostPath` mount | `Running` — "Macker is running the trusted native workload" |
+| no `ports:`, same writable mount | refused, token error above; the captured argv contains no `-p` at all |
+| `ports: [{containerPort: 8080}]`, `readOnly: true` mount | `:ro` forwarded correctly; failed later at the mount, see below |
 
 ## Verifying it from the cluster
 
@@ -230,4 +272,6 @@ never became Ready" can be paired with "the mount really exists, read-only".
 `test-native-workload-lifecycle.sh` also covers the writable `hostPath` lifecycle
 against a real cluster, including that an invalid volume rollout leaves the Pod
 `Pending` rather than terminal, so a ReplicaSet does not stream replacements
-against a manifest the node cannot run.
+against a manifest the node cannot run. Every Pod the script renders declares
+`ports:` deliberately: otherwise a failure would be the config-token refusal
+above and could not be read as a verdict on `readOnly`.

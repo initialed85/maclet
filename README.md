@@ -385,8 +385,13 @@ By default, each TCP/UDP container port becomes a Macker mapping such as
 `-p 8080:auto/tcp`; Macker allocates and persists a unique process port, injects
 it as `MACKER_PORT_N`, and PF redirects traffic addressed to that Pod IP and
 declared port. The image must honor `MACKER_PORT_N` (for example, the bundled
-nginx image substitutes it in its configuration). To use a fixed direct port
-instead, set the Pod-template annotation
+nginx image substitutes it in its configuration). Unlike upstream Kubernetes,
+where `ports:` is informational, a Pod on a maclet node must declare the ports an
+image's config tokens need: tokens are filled from the published ports in `-p`
+order, and Macker refuses to start a workload whose rootfs holds a token with no
+published port behind it (`token ____MACKER_PORT_1____ has no runtime value`), so
+a Pod that omits `ports:` is refused rather than run half-configured. To use a
+fixed direct port instead, set the Pod-template annotation
 `k8s-darwin.dev/disable-port-forward: "true"`; maclet then supplies the
 container port directly as `MACKER_PORT_N` and does not install PF mappings.
 The Kubernetes Pod status is updated with the allocated
