@@ -195,6 +195,19 @@ sweeper described above. The force-delete path itself is verified by tests, and 
 refused Pod still gets its `MacletMissingNativeLabel` Event while it is alive, so the
 reason a workload was never run here is visible before it is removed.
 
+The sweeper is now the backstop rather than the only path. maclet deletes the object
+itself in the pass that stops the workload -- report terminal phase, then delete with
+`gracePeriodSeconds=0`, kubelet's order -- so a deletion maclet can see is bounded by one
+reconcile interval instead of by the 45s window. Measured on `icarus-2.local` 2026-11-25
+during a Deployment teardown: three ReplicaSet generations coexisted, two Pods Terminating
+and a third created one second before the snapshot, because a ReplicaSet that is itself
+terminating keeps reconciling toward its desired count while its Pods wait to be swept.
+All three were acknowledged and removed inside one pass (20:08:52.04 to 20:08:52.46) once
+the API cascade had given them deletion timestamps; the minutes of apparent lag were the
+cascade's, not maclet's. A Pod whose workload cannot be stopped has its failure reported
+and the acknowledgement skipped, so an object never vanishes without an account of it, and
+the sweeper still catches it.
+
 ## How a refusal surfaces
 
 A Pod a maclet node cannot run stays `Pending`. While a Pod is `Pending`,
