@@ -222,6 +222,14 @@ func (m *workloadManager) readOnlyVolumeCapability() (bool, bool, string) {
 			// `unmount_failed` is a mount whose lifecycle the runtime could not complete;
 			// maclet refuses both, because promising a Pod a read-only volume it cannot
 			// guarantee is the failure this gate exists to prevent.
+			//
+			// Anything maclet does not recognise lands here too, and that is the contract
+			// macker and maclet agreed before the code existed: `enforced` means a mount
+			// existed, was read-only node-wide for its lifetime, and was released. A
+			// per-process sandbox (`policy_enforced_per_process`, if seatbelt is ever
+			// adopted) dies with the process and so cannot make that promise, which is why
+			// it is container hardening and not `:ro` capability -- it must keep arriving
+			// here, refusing, whatever its `read_only_supported` field says.
 			return false, true, m.readOnlyProbeRefusal(verdict)
 		}
 	}
@@ -239,7 +247,7 @@ func (m *workloadManager) readOnlyVolumeCapability() (bool, bool, string) {
 		// A Macker that advertises `:ro` on a macOS without nullfs still accepts the
 		// flag and still fails the mount, so the platform has to be checked before
 		// promising a Pod its volume will be read-only.
-		return false, false, "this operating system provides no usable read-only bind mount for a hostPath: no mount helper, no null filesystem bundle, and no vfs.generic.nullfs sysctl entry. The built kernel registers no nullfs VFS (a calibrated mount(2) answers ENODEV for the type), and in Apple's source for this Darwin generation nullfs_mount() requires the private entitlement com.apple.private.nullfs_allow with no superuser fallback, so neither root nor a vendored helper can create the read-only view a readOnly volume asks for."
+		return false, false, "this operating system provides no usable read-only bind mount for a hostPath: no mount helper and no null filesystem bundle for the userland route. This kernel does build nullfs, and mount(2) for the registered type name answers EPERM even as root, because nullfs_mount() requires the private entitlement com.apple.private.nullfs_allow with no superuser fallback -- so neither root nor a vendored helper can create the read-only view a readOnly volume asks for."
 	}
 	return supported, false, ""
 }

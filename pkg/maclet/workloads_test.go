@@ -913,6 +913,20 @@ func TestReadOnlyCapabilityFollowsTheProbeLadder(t *testing.T) {
 			wantDetail:  "could not be released",
 			wantSupport: false,
 		},
+		{
+			// The boundary macker and maclet agreed before any such code exists:
+			// `enforced` means a mount that was read-only node-wide for its lifetime and
+			// was released. A per-process sandbox dies with the process, so a status like
+			// this one is container hardening, never :ro capability -- and it has to refuse
+			// even when the field beside it says supported, because that field would be
+			// answering a different question than the one the gate asks.
+			name:        "an unknown status cannot grant read-only even when the field says it does",
+			probe:       `{"read_only_supported":true,"mechanism":"seatbelt","probed":true,"probe_status":"policy_enforced_per_process","reason":"a seatbelt sandbox profile is applied per process and dies with it"}`,
+			plain:       `{"read_only_supported":true,"mechanism":"seatbelt","reason":"policy is on"}`,
+			wantSupport: false,
+			wantDetail:  "per process",
+			wantAbsent:  "policy is on",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fake := filepath.Join(root, "macker-"+strings.ReplaceAll(tc.name, " ", "-"))

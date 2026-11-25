@@ -228,18 +228,22 @@ func mackerReportsReadOnlyMountFailure(detail string) bool {
 // read-only bind mount at all, independently of which Macker is installed. It
 // exists because Macker advertises `HOST:CONTAINER[:ro]` from its argument
 // grammar, which describes what the binary is able to ask for rather than what
-// this kernel is able to do. Measured on the icarus node (macOS 26.6.2, arm64):
-// no /sbin/mount_nullfs, no mount_null helper in /sbin at all, no null.fs bundle for
-// mount(8) to exec (`mount -t null` fails with error 72), and no vfs.generic.nullfs
-// sysctl entry; a calibrated mount(2) with fstype "null" returns ENODEV. macker reads
-// xnu-12377.121.6 as still containing bsd/miscfs/nullfs with nullfs_mount() gated on the
-// private entitlement com.apple.private.nullfs_allow and no superuser fallback, which is
-// why no helper, vendored or otherwise, can mount here -- whether the type is also
-// unregistered on this build (which ENODEV would suggest) is open in macker's lane. Both
-// readings end the same place: no Macker build can enforce a read-only hostPath mount on
-// this OS, so maclet refuses it at admission. The probe checks presence rather than
-// mounting, because a real mount would need root and would make unit tests depend on the
-// machine running them.
+// this kernel is able to do. Measured on the icarus node (macOS 26.6.2, arm64): no
+// /sbin/mount_nullfs, no mount_null helper in /sbin at all, no null.fs bundle for
+// mount(8) to exec (`mount -t null` fails with error 72). The kernel half is settled by
+// macker's calibrated mount(2) probe on that node: the registered type name is `nullfs`
+// and it answers EPERM even as root, where the Linux-style name `null` answers ENODEV (19)
+// exactly as a made-up name does. That matches macker's reading of xnu-12377.121.6, where
+// bsd/miscfs/nullfs is built in and nullfs_mount() is gated on the private entitlement
+// com.apple.private.nullfs_allow with no superuser fallback -- so no helper, vendored or
+// otherwise, can mount here, and neither root nor an entitlement a third-party binary can
+// hold changes the answer. The `vfs.generic.nullfs` sysctl is consulted only as weak
+// positive evidence: `vfs.generic` lists tunables, not registered filesystems (it omits
+// devfs, which demonstrably mounts), so its absence settles nothing and it can never grant
+// on its own. Everything ends the same place: no Macker build can enforce a read-only
+// hostPath mount on this OS, so maclet refuses it at admission. The probe checks presence
+// rather than mounting, because a real mount would need root and would make unit tests
+// depend on the machine running them.
 type readOnlyPlatformProbe struct {
 	// exists reports whether a path is present. Helpers, filesystem bundles.
 	exists func(path string) bool
@@ -283,12 +287,11 @@ func (p readOnlyPlatformProbe) hasNullfs() bool {
 	return false
 }
 
-// defaultReadOnlyPlatformProbe checks the running system. maclet is a Darwin node
-// agent, so the same function serves production and, with the fields replaced, the
-// unit tests.
 // defaultReadOnlyPlatformProbe checks the running system. maclet's own node is
 // always Darwin; off Darwin there is nothing to measure, and unit tests should run
-// wherever the developer runs them rather than depend on the machine's kernel.
+// wherever the developer runs them rather than depend on the machine's kernel. maclet
+// is a Darwin node agent, so the same function serves production and, with the fields
+// replaced, the unit tests.
 func defaultReadOnlyPlatformProbe() readOnlyPlatformProbe {
 	if runtime.GOOS != "darwin" {
 		return readOnlyPlatformProbe{exists: func(string) bool { return true }, kernelFeature: func(string) bool { return true }}
