@@ -277,6 +277,9 @@ func TestNodeStatusIncludesExternalIP(t *testing.T) {
 
 func TestDesiredNode(t *testing.T) {
 	node := desiredNode("maclet", "192.168.137.111")
+	if got := node.ObjectMeta.Labels["kubernetes.io/hostname"]; got != "maclet" {
+		t.Errorf("hostname label = %q, want the Node name: nodeSelector on kubernetes.io/hostname is the common case", got)
+	}
 	if node.ObjectMeta.Labels["kubernetes.io/os"] != "darwin" {
 		t.Errorf("OS label = %q, want darwin", node.ObjectMeta.Labels["kubernetes.io/os"])
 	}

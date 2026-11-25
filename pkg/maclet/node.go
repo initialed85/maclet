@@ -37,6 +37,13 @@ func desiredNode(name, nodeIP string) Node {
 		"kubernetes.io/os":   "darwin",
 		managedLabelKey:      managedLabelValue,
 	}
+	// Every kubelet sets this, and it is the nodeSelector key real manifests use most
+	// (Deployments use it for anti-affinity). Without it a Pod that says "put me on
+	// icarus-2.local" is unschedulable on a maclet node with no error beyond the
+	// scheduler's "didn't match Pod's node affinity/selector".
+	if name != "" {
+		labels["kubernetes.io/hostname"] = name
+	}
 	if nodeIP == "" {
 		nodeIP = "127.0.0.1"
 	}

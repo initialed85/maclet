@@ -13,7 +13,8 @@ runtime.
 ## The stance
 
 1. **The node says what it is.** maclet registers with
-   `kubernetes.io/os=darwin`, `kubernetes.io/arch=<host arch>`, and the taint
+   `kubernetes.io/os=darwin`, `kubernetes.io/arch=<host arch>`,
+   `kubernetes.io/hostname=<Node name>`, and the taint
    `k8s-darwin.dev/native=true:NoSchedule`. A workload lands on a maclet node
    only if it tolerates that taint, so nothing arrives here by accident.
 2. **A core field is honoured when the runtime can enforce it.** Where Macker
@@ -142,6 +143,7 @@ not what a Linux reader assumes:
 | Field | On a maclet node |
 | --- | --- |
 | `nodeSelector: k8s-darwin.dev/native: "true"` + toleration | Required to schedule here at all |
+| `nodeSelector: kubernetes.io/hostname: <Node name>` | Honoured: maclet registers the label every kubelet sets, so pinning a workload to one Mac works. It was absent on maclet nodes until this build, and a Pod asking for it failed with only the scheduler's "didn't match Pod's node affinity/selector" |
 | Pod label `k8s-darwin.dev/native=true` | **Required to be run.** maclet only supervises Pods carrying this label. An unlabelled Pod bound to the node is reported `Pending` with reason `MacletMissingNativeLabel` and a message naming the label, instead of sitting unexplained forever |
 | `spec.containers` | Exactly one. Sidecars are refused (`MacletUnsupportedPod`) |
 | `spec.initContainers` | Not executed, and not refused — see rule 4. Do not rely on an init container for ordering or setup here |
