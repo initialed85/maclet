@@ -74,13 +74,18 @@ func podEventStateKey(pod Pod, phase, reason, message string) string {
 func podEventName(pod Pod, phase, reason, message string) string {
 	digest := sha256.Sum256([]byte(podEventStateKey(pod, phase, reason, message)))
 	hash := hex.EncodeToString(digest[:])[:10]
-	// The Pod's own name makes the Event list readable; the hash is what keeps two
-	// states from colliding.
-	podKey := sanitizeNamePart(strings.ToLower(pod.ObjectMeta.Namespace + "." + pod.ObjectMeta.Name))
-	if len(podKey) > 20 {
-		podKey = podKey[len(podKey)-20:]
+	// The Pod's own name makes the Event list readable. The namespace is not part of
+	// it: the Event already lives in that namespace, and including both produced names
+	// whose head was a truncated fragment of a namespace.
+	podKey := sanitizeNamePart(strings.ToLower(pod.ObjectMeta.Name))
+	if len(podKey) > 32 {
+		podKey = sanitizeNamePart(podKey[len(podKey)-32:])
 	}
-	name := "maclet." + sanitizeNamePart(strings.ToLower(phase)) + "." + sanitizeNamePart(shortEventReason(reason)) + "." + sanitizeNamePart(podKey) + "." + hash
+	name := "maclet." + sanitizeNamePart(strings.ToLower(phase)) + "." + sanitizeNamePart(shortEventReason(reason))
+	if podKey != "" {
+		name += "." + podKey
+	}
+	name += "." + hash
 	if len(name) > 63 {
 		name = name[:63]
 	}

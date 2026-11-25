@@ -180,9 +180,10 @@ func TestPodEventPointsAtTheContract(t *testing.T) {
 	if len(event.ObjectMeta.Name) > 63 || strings.HasPrefix(event.ObjectMeta.Name, ".") {
 		t.Errorf("name %q is not a usable object name", event.ObjectMeta.Name)
 	}
-	if !strings.HasPrefix(event.ObjectMeta.Name, "maclet.pending.unsupported.demo-namespace.hello.") {
-		// The Pod's name is in the Event name so a `describe` reads as a sentence; the
-		// namespace is sanitized because Kubernetes names may not contain underscores.
+	if !strings.HasPrefix(event.ObjectMeta.Name, "maclet.pending.unsupported.hello.") {
+		// The Pod's name is in the Event name so `describe` reads as a sentence. The
+		// namespace is not, because the Event already lives in that namespace, and
+		// underscores are not legal in a Kubernetes name.
 		t.Errorf("name %q does not read as a maclet Event", event.ObjectMeta.Name)
 	}
 	if event.Count != 1 || event.FirstTimestamp.IsZero() || event.LastTimestamp.IsZero() {
