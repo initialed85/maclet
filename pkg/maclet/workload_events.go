@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -28,6 +27,13 @@ import (
 // Pod whose Event list buries the one line that matters. maclet therefore keys an
 // Event to the *state* it is reporting, names it deterministically, writes it once,
 // and then stays quiet until either the state changes or the cooldown expires.
+//
+// What a node is actually allowed to do shapes that. NodeRestriction grants a node
+// create and patch on events but not get, so maclet can never read an Event back to
+// increment it (measured: a GET returns 403 for system:node:icarus-2.local). The
+// count is therefore maclet's own tally of how many times it has reported a state,
+// merged in with a patch, and a repeat POST that collides with the object a previous
+// maclet process filed is a merge rather than a re-read.
 
 const (
 	// macletEventRepeatInterval is how long maclet stays quiet about a Pod state it
@@ -54,6 +60,12 @@ const (
 type podEventMemory struct {
 	key string
 	at  time.Time
+	// count is how many times maclet has reported this state. It is tracked locally
+	// because a node author is not allowed to read an Event back -- NodeRestriction
+	// grants create and patch on events, and a GET is refused with 403 -- so the count
+	// in the object is whatever the last writer said, and maclet's own tally is the
+	// only number it can offer.
+	count int32
 }
 
 // podEventStateKey identifies the *state* an Event reports: which Pod, the phase,
@@ -163,15 +175,20 @@ func (m *workloadManager) recordPodEvent(ctx context.Context, client *APIClient,
 		return
 	}
 	changed := !seen || memory.key != key
-	m.podEvents[podKey] = podEventMemory{key: key, at: time.Now()}
+	count := int32(1)
+	if !changed {
+		// A state that is still true an interval later: same Event, said again.
+		count = memory.count + 1
+	}
+	m.podEvents[podKey] = podEventMemory{key: key, at: time.Now(), count: count}
 	m.eventMu.Unlock()
 
-	event := m.buildPodEvent(pod, phase, reason, message, changed)
+	event := m.buildPodEvent(pod, phase, reason, message, count)
 	emit := m.emitEvent
 	if emit == nil {
 		emit = postPodEvent
 	}
-	if err := emit(ctx, client, event, changed); err != nil {
+	if err := emit(ctx, client, event, count == 1); err != nil {
 		// Forget the memory so the next pass retries rather than staying quiet about
 		// something the API server never accepted.
 		m.eventMu.Lock()
@@ -188,8 +205,8 @@ func (m *workloadManager) recordPodEvent(ctx context.Context, client *APIClient,
 // buildPodEvent assembles the object maclet files. The namespace, host, and
 // reporting identity are the three fields NodeRestriction checks for a node author,
 // so each is taken from the Pod itself rather than from configuration that could
-// disagree with it.
-func (m *workloadManager) buildPodEvent(pod *Pod, phase, reason, message string, first bool) *Event {
+// disagree with it. count is how many times maclet has reported this state.
+func (m *workloadManager) buildPodEvent(pod *Pod, phase, reason, message string, count int32) *Event {
 	now := metav1.NewTime(time.Now().UTC())
 	nodeName := pod.Spec.NodeName
 	if nodeName == "" {
@@ -236,12 +253,7 @@ func (m *workloadManager) buildPodEvent(pod *Pod, phase, reason, message string,
 		Type:                podEventType(phase, reason),
 		FirstTimestamp:      now,
 		LastTimestamp:       now,
-		Count:               1,
-	}
-	if !first {
-		// A re-touch: the count and timestamps describe a state that has persisted,
-		// which is what the API server copy will be updated to.
-		event.Count = 0
+		Count:               count,
 	}
 	return event
 }
@@ -259,55 +271,59 @@ func coreObjectReference(pod *Pod) ObjectReference {
 	}
 }
 
-// postPodEvent files the Event. A state change creates it; a re-touch of a state
-// maclet has already reported updates the existing object so the Event list keeps one
-// line per state with a rising count, which is the deduplication home-ops asked for.
+// postPodEvent files the Event. The first report of a state creates it; a later
+// report of the same state merges into the object that already exists, so the Event
+// list keeps one line per state with a rising count -- the deduplication home-ops
+// asked for. create is derived from maclet's count rather than from a read, because a
+// node author cannot read Events back (see patchPodEvent).
 func postPodEvent(ctx context.Context, client *APIClient, event *Event, create bool) error {
 	path := "/api/v1/namespaces/" + event.ObjectMeta.Namespace + "/events"
-	if create {
-		if _, err := client.PostJSON(ctx, path, event); err != nil {
-			var httpErr *HTTPError
-			if errors.As(err, &httpErr) && httpErr.Code == 409 {
-				// The object exists — a previous maclet process wrote it. Merge into it
-				// instead of reporting a failure forever.
-				return touchPodEvent(ctx, client, event)
-			}
-			return err
-		}
-		return nil
+	if !create {
+		return patchPodEvent(ctx, client, event)
 	}
-	return touchPodEvent(ctx, client, event)
-}
-
-// touchPodEvent bumps count and lastTimestamp on an Event maclet has already filed.
-// The read is deliberate: an update needs the object's current resourceVersion, and
-// rewriting from maclet's local copy would clobber the count the API server is
-// keeping.
-func touchPodEvent(ctx context.Context, client *APIClient, event *Event) error {
-	namePath := "/api/v1/namespaces/" + event.ObjectMeta.Namespace + "/events/" + event.ObjectMeta.Name
-	body, err := client.Get(ctx, namePath)
-	if err != nil {
+	if _, err := client.PostJSON(ctx, path, event); err != nil {
 		var httpErr *HTTPError
-		if errors.As(err, &httpErr) && httpErr.Code == 404 {
-			// Expired or deleted: file it again as new.
-			_, postErr := client.PostJSON(ctx, "/api/v1/namespaces/"+event.ObjectMeta.Namespace+"/events", event)
-			return postErr
+		if errors.As(err, &httpErr) && httpErr.Code == 409 {
+			// The object exists -- a previous maclet process wrote this same state.
+			// Merge into it rather than reporting a failure forever.
+			return patchPodEvent(ctx, client, event)
 		}
 		return err
 	}
-	existing := &Event{}
-	if err := json.Unmarshal(body, existing); err != nil {
-		return fmt.Errorf("decode existing Event %s: %w", event.ObjectMeta.Name, err)
+	return nil
+}
+
+// patchPodEvent merges a repeat report into the Event already stored. It cannot read
+// the object first: NodeRestriction grants a node create and patch on events but not
+// get, and a GET is answered with 403 (measured on icarus-2 against the live API
+// server), which is why maclet keeps its own tally and sends it. A patch denied for
+// lack of permission is not a failure worth logging every reconcile -- the state was
+// reported once, and the object carries it -- so it is treated as done.
+func patchPodEvent(ctx context.Context, client *APIClient, event *Event) error {
+	namePath := "/api/v1/namespaces/" + event.ObjectMeta.Namespace + "/events/" + event.ObjectMeta.Name
+	// No resourceVersion: there is no way to read the current one, and last-writer
+	// wins is the right semantics for a counter on a report.
+	payload := map[string]any{
+		"metadata":      map[string]any{"name": event.ObjectMeta.Name, "namespace": event.ObjectMeta.Namespace},
+		"reason":        event.Reason,
+		"message":       event.Message,
+		"type":          event.Type,
+		"count":         event.Count,
+		"lastTimestamp": event.LastTimestamp.Format(time.RFC3339Nano),
 	}
-	now := metav1.NewTime(time.Now().UTC())
-	if existing.Count == 0 {
-		existing.Count = 1
+	if _, err := client.PatchJSON(ctx, namePath, payload); err != nil {
+		var httpErr *HTTPError
+		if errors.As(err, &httpErr) {
+			switch httpErr.Code {
+			case 403:
+				return nil
+			case 404:
+				// Expired or deleted: file it again as new.
+				_, postErr := client.PostJSON(ctx, "/api/v1/namespaces/"+event.ObjectMeta.Namespace+"/events", event)
+				return postErr
+			}
+		}
+		return err
 	}
-	existing.Count++
-	existing.LastTimestamp = now
-	existing.Message = event.Message
-	existing.Type = event.Type
-	existing.Reason = event.Reason
-	_, err = client.PutJSON(ctx, namePath, existing)
-	return err
+	return nil
 }

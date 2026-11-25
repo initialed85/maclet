@@ -183,7 +183,10 @@ against the state they report: one Event per distinct `phase`/`reason`/`message`
 a `count` that rises if the state persists past 30 minutes, because reconciliation
 rewrites the same status every few seconds and an unthrottled writer would bury the
 line that matters. A refusal therefore appears once, with a stable name like
-`maclet.pending.unsupported.<pod>.<hash>`.
+`maclet.pending.unsupported.<pod>.<hash>`. The count is maclet's own tally, merged in
+with a patch: NodeRestriction lets a node create and patch Events but not read them
+back (a `GET` returns 403 for `system:node`), so no author on a node can increment a
+number it cannot see.
 
 One gap remains, stated rather than promised: the Ready condition reason is the generic
 `ContainersNotReady`. The named reasons above are greppable in `.status.reason`, in the

@@ -52,7 +52,7 @@ func serveEvent(response http.ResponseWriter, request *http.Request) bool {
 	if !strings.Contains(request.URL.Path, "/events") {
 		return false
 	}
-	if request.Method != http.MethodPost && request.Method != http.MethodGet && request.Method != http.MethodPut {
+	if request.Method != http.MethodPost && request.Method != http.MethodGet && request.Method != http.MethodPut && request.Method != http.MethodPatch {
 		return false
 	}
 	body, _ := io.ReadAll(request.Body)
@@ -134,8 +134,8 @@ func TestRecordPodEventRetouchesAnExpiredState(t *testing.T) {
 	if len(events) != 2 {
 		t.Fatalf("recorded %d Events, want the expired state re-touched", len(events))
 	}
-	if events[1].Count != 0 {
-		t.Errorf("a re-touch should carry no count of its own so the stored count is incremented, got %d", events[1].Count)
+	if events[1].Count != 2 {
+		t.Errorf("a repeat report should carry count 2, got %d (maclet tracks the tally itself because a node cannot read an Event back)", events[1].Count)
 	}
 }
 
@@ -250,72 +250,112 @@ func TestRecordPodEventRetriesAfterAFailure(t *testing.T) {
 }
 
 // TestPostPodEventMergesIntoAnExistingObject covers the restart path: a deterministic
-// name means a second maclet process collides with the Event it already filed, and
-// the answer is to bump that object rather than to fail.
+// name means a second maclet process collides with the Event it already filed, and the
+// answer is to merge into that object rather than to fail. It also pins the permission
+// boundary measured on the live node -- a node author may patch an Event but may not
+// read one, so a denied patch is treated as "already reported" rather than retried
+// forever.
 func TestPostPodEventMergesIntoAnExistingObject(t *testing.T) {
-	var mu sync.Mutex
-	stored := &Event{
-		ObjectMeta:     metav1.ObjectMeta{Name: "maclet.Pending.unsupported.abc", Namespace: "ns", ResourceVersion: "9"},
-		InvolvedObject: ObjectReference{Kind: "Pod", Namespace: "ns", Name: "hello"},
-		Reason:         "MacletUnsupportedPod",
-		Message:        "old detail",
-		Type:           "Warning",
-		Count:          3,
-	}
-	var methods []string
-	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mu.Lock()
-		methods = append(methods, r.Method+" "+r.URL.Path)
-		mu.Unlock()
-		switch {
-		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/namespaces/ns/events":
-			w.WriteHeader(http.StatusConflict)
-			fmt.Fprint(w, `{"kind":"Status","status":"Failure","reason":"AlreadyExists","code":409}`)
-		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/namespaces/ns/events/maclet.Pending.unsupported.abc":
-			body, _ := json.Marshal(stored)
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write(body)
-		case r.Method == http.MethodPut && r.URL.Path == "/api/v1/namespaces/ns/events/maclet.Pending.unsupported.abc":
-			var updated Event
-			if err := json.NewDecoder(r.Body).Decode(&updated); err != nil {
-				t.Fatalf("decode PUT body: %v", err)
+	for _, tc := range []struct {
+		name        string
+		patchCode   int
+		wantErr     bool
+		wantCount   int32
+		wantMessage string
+		wantVerbs   []string
+	}{
+		{
+			name:        "patch merges",
+			patchCode:   http.StatusOK,
+			wantCount:   2,
+			wantMessage: "new detail",
+			wantVerbs:   []string{"POST /api/v1/namespaces/ns/events", "PATCH /api/v1/namespaces/ns/events/maclet.Pending.unsupported.abc"},
+		},
+		{
+			// The state was reported once already, so a denied merge leaves the original
+			// line intact and is not something to retry on every reconcile.
+			name:        "patch forbidden is not a failure",
+			patchCode:   http.StatusForbidden,
+			wantCount:   1,
+			wantMessage: "old detail",
+			wantVerbs:   []string{"POST /api/v1/namespaces/ns/events", "PATCH /api/v1/namespaces/ns/events/maclet.Pending.unsupported.abc"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var mu sync.Mutex
+			stored := &Event{
+				ObjectMeta:     metav1.ObjectMeta{Name: "maclet.Pending.unsupported.abc", Namespace: "ns", ResourceVersion: "9"},
+				InvolvedObject: ObjectReference{Kind: "Pod", Namespace: "ns", Name: "hello"},
+				Reason:         "MacletUnsupportedPod",
+				Message:        "old detail",
+				Type:           "Warning",
+				Count:          1,
+			}
+			var methods []string
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				methods = append(methods, r.Method+" "+r.URL.Path)
+				mu.Unlock()
+				switch {
+				case r.Method == http.MethodPost && r.URL.Path == "/api/v1/namespaces/ns/events":
+					w.WriteHeader(http.StatusConflict)
+					fmt.Fprint(w, `{"kind":"Status","status":"Failure","reason":"AlreadyExists","code":409}`)
+				case r.Method == http.MethodPatch && r.URL.Path == "/api/v1/namespaces/ns/events/maclet.Pending.unsupported.abc":
+					if tc.patchCode != http.StatusOK {
+						w.WriteHeader(tc.patchCode)
+						fmt.Fprintf(w, `{"kind":"Status","status":"Failure","code":%d}`, tc.patchCode)
+						return
+					}
+					var patch struct {
+						Count   int32  `json:"count"`
+						Message string `json:"message"`
+					}
+					if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
+						t.Fatalf("decode PATCH body: %v", err)
+					}
+					mu.Lock()
+					stored.Count = patch.Count
+					stored.Message = patch.Message
+					mu.Unlock()
+					body, _ := json.Marshal(stored)
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = w.Write(body)
+				default:
+					t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+					w.WriteHeader(http.StatusTeapot)
+				}
+			}))
+			defer server.Close()
+			client, err := newAPIClient(server.URL, nil, "", "", true, "", "")
+			if err != nil {
+				t.Fatalf("build client: %v", err)
+			}
+			event := &Event{
+				ObjectMeta: metav1.ObjectMeta{Name: "maclet.Pending.unsupported.abc", Namespace: "ns"},
+				Reason:     "MacletUnsupportedPod",
+				Message:    "new detail",
+				Type:       "Warning",
+				Count:      2,
+			}
+			err = postPodEvent(context.Background(), client, event, true)
+			if tc.wantErr && err == nil {
+				t.Fatal("postPodEvent succeeded, want a failure")
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("postPodEvent: %v (requests %v)", err, methods)
 			}
 			mu.Lock()
-			*stored = updated
-			mu.Unlock()
-			body, _ := json.Marshal(updated)
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write(body)
-		default:
-			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
-			w.WriteHeader(http.StatusTeapot)
-		}
-	}))
-	defer server.Close()
-	client, err := newAPIClient(server.URL, nil, "", "", true, "", "")
-	if err != nil {
-		t.Fatalf("build client: %v", err)
-	}
-	event := &Event{
-		ObjectMeta: metav1.ObjectMeta{Name: "maclet.Pending.unsupported.abc", Namespace: "ns"},
-		Reason:     "MacletUnsupportedPod",
-		Message:    "new detail",
-		Type:       "Warning",
-		Count:      0,
-	}
-	if err := postPodEvent(context.Background(), client, event, true); err != nil {
-		t.Fatalf("postPodEvent: %v (requests %v)", err, methods)
-	}
-	mu.Lock()
-	defer mu.Unlock()
-	if stored.Count != 4 {
-		t.Errorf("count = %d, want the existing 3 incremented to 4", stored.Count)
-	}
-	if stored.Message != "new detail" {
-		t.Errorf("message = %q, want maclet's current detail", stored.Message)
-	}
-	if len(methods) != 3 {
-		t.Errorf("requests = %v, want POST then GET then PUT", methods)
+			defer mu.Unlock()
+			if stored.Count != tc.wantCount {
+				t.Errorf("stored count = %d, want %d", stored.Count, tc.wantCount)
+			}
+			if stored.Message != tc.wantMessage {
+				t.Errorf("stored message = %q, want %q", stored.Message, tc.wantMessage)
+			}
+			if strings.Join(methods, " | ") != strings.Join(tc.wantVerbs, " | ") {
+				t.Errorf("requests = %v, want %v (a node author cannot GET an Event)", methods, tc.wantVerbs)
+			}
+		})
 	}
 }
 
