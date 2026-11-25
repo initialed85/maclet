@@ -112,9 +112,22 @@ directions on one node. macOS `strerror(19)` reads *"Operation not supported by 
 a probe that prints the string instead of the macro reports 19 as though it were `ENOTSUP`;
 the macro for 19 in `<sys/errno.h>` and in xnu's tables is `ENODEV`, and `ENOTSUP` is 45 (Go's
 generated Darwin table agrees: `ENODEV = 0x13`, `ENOTSUP = 0x2d`). A second trap is the
-bogus-spec control: what `apfs` answers depends on the mount data you hand it, so the
-calibration that matters is the name that **succeeds** -- `devfs` mounts read-only and
-unmounts cleanly -- not whatever errno a filesystem you were never going to mount returns.
+bogus-spec control: what `apfs` answers depends on the mount data you hand it -- `EINVAL` (22)
+with a nullfs-shaped conf, `EFAULT` (14) with `/dev/null` -- so the calibration that matters is
+the name that **succeeds**, `devfs` mounting read-only and releasing cleanly, not whatever errno
+a filesystem you were never going to mount returns.
+
+A third trap produced the wrong half of this conclusion, and it is the call form itself.
+`mount(2)` on Darwin is `mount(type, path, flags, data)`. A probe that hands the kernel a source
+path where the type belongs, a struct size where the flags belong, a `struct mount_args *` as
+its only argument (the pre-BSD ABI, which is what `xnu`'s 167 does not expect), or glibc's
+five-argument Linux `mount(src, dst, fstype, flags, data)` is answering a question about its own
+arguments, not about the kernel -- in the five-argument case the filesystem name the kernel is
+asked for is a directory path, so a case whose own output line reads "nullfs spelled out" never
+asked for `nullfs` at all. Darwin's `unmount` is syscall 159, and 166 raises `SIGSYS` on arm64,
+which is how one version of this probe died holding a mount it had just made. The reading that
+settled the question used the four-argument form -- the same one that calibrates `devfs` and
+`apfs` -- and it answers `EPERM` for `nullfs` while `null` and `bogusfsxyz` both answer 19.
 Reading `null` alone therefore settles nothing: it is simply not the registered name, and it
 behaves exactly like an invented one.
 
