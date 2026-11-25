@@ -412,7 +412,9 @@ fi
 # ReplicaSet cascade catches up, and that is not a maclet failure. What is one: a Pod
 # that never gets a deletion timestamp, or one that has it and is not removed, because
 # on a darwin node only maclet can finish that deletion.
-"${K[@]}" -n "$NAMESPACE" delete deployment "$APP" --wait=true --timeout=120s >/dev/null
+# The read-only block above may already have deleted the Deployment, and a delete of a
+# missing object is not a teardown failure -- the assertion is what happens to the Pods.
+"${K[@]}" -n "$NAMESPACE" delete deployment "$APP" --wait=true --timeout=120s >/dev/null 2>&1 || true
 deadline=$((SECONDS + 180))
 acked_seen=false
 last_unacked=""
