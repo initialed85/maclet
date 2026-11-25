@@ -435,12 +435,20 @@ maclet-supervised Pod. Two errors made it look broken:
    Macker loads on macOS 26 — it showed no `macker-*` anchor while eleven were loaded
    and carrying traffic, one of which was verified to do so with `Evaluations: 142`
    from off-node attempts. Read the redirect state with `sudo macker ports
-   [--format json]` (Macker 55fa6d6+), which names each container's own anchor and
-   prints the kernel's `Evaluations`/`States` for its rule.
+   [--format json]`, which names each container's own anchor and prints the kernel's
+   `Evaluations`/`States` for its rule -- the build on this node answers it, so no
+   upgrade is needed to ask this question.
 2. A PodIP is aliased locally on the node (`route -n get <PodIP>` → interface `lo0`,
    flags `LOCAL`), so traffic the node originates to its own PodIP is never evaluated
    by PF at all. The same rule read `Evaluations: 0` under node-local attempts. A
    node-local `curl http://<PodIP>:<port>/` proves nothing in either direction.
+
+Reproduced from maclet's side, same node, same instant, one Pod: `pf8090` with
+`containerPort: 8090`, PodIP `10.42.6.4`, requested from this repository's own workload
+Pod (`192.168.137.150`) -- `http://10.42.6.4:8090/` returned nginx's own 404 body, 153
+bytes, while a `curl` from the node to the same address returned no HTTP status at all and
+`macker ports` reported `8090:30109/tcp` with `Evaluations 251, States 1`. Off-node works
+and node-local does not, on the same rule, which is the whole artifact in one measurement.
 
 Measured properly, on a Pod maclet supervises: `maclet-pf-check-long-name-abc-de`
 with `ports: [{containerPort: 8080}]`, PodIP `10.42.6.3`, requested from a workload Pod
