@@ -101,6 +101,11 @@ type workloadManager struct {
 	// Pod asking for readOnly does not re-probe on every reconciliation pass.
 	readOnlyVolumes         *bool
 	readOnlyVolumesProbedAt time.Time
+	// readOnlyVolumesReason is why the cached answer is what it is, in the words of
+	// whoever measured it -- Macker's `volumes` report where that answered, maclet's
+	// own platform reading otherwise. It goes into the refusal an operator reads, so
+	// the cause is never something they have to re-derive from a log.
+	readOnlyVolumesReason string
 	// readOnlyVolumesNodeRejected records that Macker advertised the read-only
 	// volume marker but a launch still failed on the mount itself. It is sticky
 	// until the Macker binary changes, so maclet refuses readOnly volumes at
@@ -155,13 +160,26 @@ func (m *workloadManager) supportsReadOnlyVolumes() bool {
 	if m.readOnlyVolumes != nil && (*m.readOnlyVolumes || time.Since(m.readOnlyVolumesProbedAt) < mackerReadOnlyVolumeRetry) {
 		return *m.readOnlyVolumes
 	}
-	supported, decidedByRuntime := m.readOnlyVolumeCapability()
+	supported, decidedByRuntime, reason := m.readOnlyVolumeCapability()
 	if m.debug {
 		log.Printf("debug: Macker read-only volume support detected: %t (from runtime probe: %t)", supported, decidedByRuntime)
 	}
 	m.readOnlyVolumes = &supported
+	m.readOnlyVolumesReason = reason
 	m.readOnlyVolumesProbedAt = time.Now()
 	return supported
+}
+
+// readOnlyVolumesRefusalDetail returns the node-specific cause behind a negative
+// capability answer, for embedding in the refusal. It probes if nothing has been
+// cached yet, because the refusal is only read when the answer is already no.
+func (m *workloadManager) readOnlyVolumesRefusalDetail() string {
+	if !m.supportsReadOnlyVolumes() {
+		m.capabilityMu.Lock()
+		defer m.capabilityMu.Unlock()
+		return m.readOnlyVolumesReason
+	}
+	return ""
 }
 
 // readOnlyVolumeCapability asks whether a read-only -v mount can actually be
@@ -171,18 +189,28 @@ func (m *workloadManager) supportsReadOnlyVolumes() bool {
 // Where the installed Macker predates that probe, maclet falls back to the help
 // marker -- argument grammar, which says nothing about the kernel -- and then to its
 // own read-only of the platform.
-func (m *workloadManager) readOnlyVolumeCapability() (bool, bool) {
+func (m *workloadManager) readOnlyVolumeCapability() (bool, bool, string) {
 	if verdict, ok := parseMackerReadOnlyVerdict(m.mackerHelpOutput("volumes", "--format", "json")); ok {
-		return verdict.ReadOnlySupported, true
+		reason := strings.TrimSpace(verdict.Reason)
+		if verdict.ReadOnlySupported && reason == "" {
+			reason = fmt.Sprintf("Macker reports it can enforce read-only volumes here via %q", verdict.Mechanism)
+		}
+		return verdict.ReadOnlySupported, true, reason
+	}
+	if m.readOnlyVolumesNodeRejected {
+		return false, false, "the installed Macker failed a read-only volume mount on this node, so maclet stopped forwarding :ro until the binary changes"
 	}
 	supported := mackerHelpAdvertisesReadOnlyVolumes(string(m.mackerHelpOutput("run", "--help")))
-	if supported && !m.readOnlyPlatformSupportsMounts() {
+	if !supported {
+		return false, false, fmt.Sprintf("the installed Macker does not accept the %q volume form, so it cannot be asked for a read-only mount; upgrade Macker (the mount lifecycle needs 363dc0c, and the capability probe that would have named the cause here needs 4527b97)", mackerReadOnlyVolumeMarker)
+	}
+	if !m.readOnlyPlatformSupportsMounts() {
 		// A Macker that advertises `:ro` on a macOS without nullfs still accepts the
 		// flag and still fails the mount, so the platform has to be checked before
 		// promising a Pod its volume will be read-only.
-		supported = false
+		return false, false, "this operating system provides no read-only bind mount mechanism: no mount helper, no null filesystem bundle, and no nullfs kernel feature (macOS 26 removed nullfs)"
 	}
-	return supported, false
+	return supported, false, ""
 }
 
 // readOnlyPlatformSupportsMounts reports whether the running OS provides nullfs,
@@ -213,6 +241,7 @@ func (m *workloadManager) noteReadOnlyVolumeNodeRejection(detail string) {
 	}
 	m.readOnlyVolumesNodeRejected = true
 	m.readOnlyRejectedBinary = m.mackerBinaryFingerprint()
+	m.readOnlyVolumesReason = strings.TrimSpace(detail)
 	log.Printf("maclet: this node cannot enforce read-only volume mounts; refusing readOnly volumes rather than launching workloads that cannot mount them")
 }
 

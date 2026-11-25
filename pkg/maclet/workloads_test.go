@@ -451,6 +451,53 @@ func TestMackerReadOnlyVolumeCapabilityProbe(t *testing.T) {
 	}
 }
 
+// TestReadOnlyRefusalCarriesTheRuntimesOwnCause is what makes a refusal actionable
+// without reading a log: where Macker measured the node and said why, maclet repeats
+// Macker's words in the Pod's own status and Event, so the operator sees "no null
+// filesystem bundle at /Library/Filesystems/null.fs" rather than a generic claim that
+// something could not be verified.
+func TestReadOnlyRefusalCarriesTheRuntimesOwnCause(t *testing.T) {
+	root := t.TempDir()
+	reporter := filepath.Join(root, "macker")
+	script := "#!/bin/sh\n" +
+		"if [ \"$1\" = volumes ]; then cat <<'JSON'\n" +
+		"{\"read_only_supported\":false,\"host\":\"darwin/arm64\",\"mechanism\":\"none\",\"reason\":\"this macOS has no null filesystem bundle at /Library/Filesystems/null.fs\"}\n" +
+		"JSON\nexit 0\nfi\n" +
+		"echo '    \thost path and container path, HOST:CONTAINER[:ro] (repeatable)'\nexit 2\n"
+	if err := os.WriteFile(reporter, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	manager := newWorkloadManager(nil, reporter, "")
+	if manager.supportsReadOnlyVolumes() {
+		t.Fatal("maclet trusted a Macker that reported read-only as unsupported")
+	}
+	detail := manager.readOnlyVolumesRefusalDetail()
+	if !strings.Contains(detail, "null filesystem bundle") {
+		t.Fatalf("refusal detail = %q, want Macker's measured cause", detail)
+	}
+	pod := Pod{ObjectMeta: ObjectMeta{Namespace: "default", Name: "web", UID: "uid-1"}, Spec: PodSpec{Volumes: []Volume{{Name: "data", VolumeSource: VolumeSource{HostPath: &HostPathVolumeSource{Path: t.TempDir()}}}}}}
+	container := ContainerSpec{VolumeMounts: []VolumeMount{{Name: "data", MountPath: "/var/data", ReadOnly: true}}}
+	_, err := mackerVolumeArgs(pod, container, false, detail)
+	if err == nil {
+		t.Fatal("a readOnly volume was forwarded to a node that reported it cannot enforce one")
+	}
+	if !strings.Contains(err.Error(), "null filesystem bundle") || !strings.Contains(err.Error(), "KUBERNETES-PARITY.md") {
+		t.Fatalf("refusal = %q, want the runtime's cause and the pointer to the contract", err)
+	}
+	// A Macker too old to answer still gets a refusal that says what to do about it.
+	quiet := filepath.Join(root, "macker-ancient")
+	if err := os.WriteFile(quiet, []byte("#!/bin/sh\necho 'usage: macker run [OPTIONS]'\nexit 2\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ancient := newWorkloadManager(nil, quiet, "")
+	if ancient.supportsReadOnlyVolumes() {
+		t.Fatal("maclet inferred read-only support from a Macker that advertises nothing")
+	}
+	if got := ancient.readOnlyVolumesRefusalDetail(); !strings.Contains(got, "upgrade Macker") {
+		t.Fatalf("refusal detail = %q, want the remedy for a Macker without the volume form", got)
+	}
+}
+
 // TestReadOnlyPlatformProbeRequiresNullfs pins the platform question: a node with
 // no nullfs helper, no null.fs bundle, and no nullfs kernel feature cannot enforce
 // a read-only hostPath mount, which is what the icarus node measures.

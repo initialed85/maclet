@@ -25,6 +25,12 @@ func (m *workloadManager) mackerVolumeArgsWithContext(ctx context.Context, pod P
 	// Probing costs one Macker usage call, and only a Pod that actually asks for
 	// readOnly needs the answer.
 	readOnlySupported := readOnlyRequested && m.supportsReadOnlyVolumes()
+	// The cause is read from the cache the probe just filled, so a Pod that does not
+	// ask for readOnly never pays for a second usage call.
+	readOnlyRefusalDetail := ""
+	if readOnlyRequested && !readOnlySupported {
+		readOnlyRefusalDetail = m.readOnlyVolumesRefusalDetail()
+	}
 	for index := range podCopy.Spec.Volumes {
 		volume := &podCopy.Spec.Volumes[index]
 		switch {
@@ -58,7 +64,7 @@ func (m *workloadManager) mackerVolumeArgsWithContext(ctx context.Context, pod P
 			mount.ReadOnly = false
 		}
 	}
-	args, err := mackerVolumeArgs(podCopy, containerCopy, readOnlySupported)
+	args, err := mackerVolumeArgs(podCopy, containerCopy, readOnlySupported, readOnlyRefusalDetail)
 	if err != nil {
 		return nil, err
 	}

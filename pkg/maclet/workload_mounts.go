@@ -293,7 +293,10 @@ func refuseManifest(format string, args ...any) error {
 	return &manifestRefusal{message: fmt.Sprintf(format, args...)}
 }
 
-func mackerVolumeArgs(pod Pod, container ContainerSpec, readOnlySupported bool) ([]string, error) {
+// mackerVolumeArgs builds the `-v` arguments for one container. refusalDetail is the
+// node-specific cause behind a negative read-only capability answer, carried into the
+// refusal so an operator reads what was measured rather than a generic sentence.
+func mackerVolumeArgs(pod Pod, container ContainerSpec, readOnlySupported bool, refusalDetail ...string) ([]string, error) {
 	volumes := make(map[string]string, len(pod.Spec.Volumes))
 	volumeTypes := make(map[string]string, len(pod.Spec.Volumes))
 	for _, volume := range pod.Spec.Volumes {
@@ -339,7 +342,11 @@ func mackerVolumeArgs(pod Pod, container ContainerSpec, readOnlySupported bool) 
 		seenMountPaths[mountPath] = struct{}{}
 		if mount.ReadOnly {
 			if !readOnlySupported {
-				return nil, refuseManifest("volume mount %q requests readOnly, but this node cannot enforce a read-only hostPath mount: Macker must accept %q and this kernel must support read-only bind mounts, and maclet verifies both. A hostPath volume on a Darwin node is a live host mapping, so running it writable would promise read-only and deliver the opposite; upgrade Macker, mount the data over NFS with readOnly, or drop readOnly (see KUBERNETES-PARITY.md)", mountPath, mackerReadOnlyVolumeMarker)
+				cause := strings.TrimSpace(strings.Join(refusalDetail, " "))
+				if cause == "" {
+					cause = fmt.Sprintf("Macker must accept %q and this kernel must support read-only bind mounts, and maclet verifies both", mackerReadOnlyVolumeMarker)
+				}
+				return nil, refuseManifest("volume mount %q requests readOnly, but this node cannot enforce a read-only hostPath mount: %s. A hostPath volume on a Darwin node is a live host mapping, so running it writable would promise read-only and deliver the opposite; mount the data over NFS with readOnly, or drop readOnly (see KUBERNETES-PARITY.md)", mountPath, cause)
 			}
 		}
 		if mount.SubPathExpr != "" {

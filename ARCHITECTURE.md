@@ -305,7 +305,12 @@ mount whose resolved host path is a single file is refused at reconciliation,
 because macOS cannot nullfs a single file, as is a `readOnly` request against a
 Macker or node that cannot enforce `:ro` — maclet never runs such a mount writable,
 and it learns from a Macker mount failure to stop forwarding `:ro` until the
-installed Macker binary changes.
+installed Macker binary changes. Where Macker's `volumes` report answered the
+capability question, its own `reason` text is carried into the refusal, so the Pod
+status and Event state the measured cause ("this macOS has no null filesystem bundle
+at /Library/Filesystems/null.fs") rather than a generic claim that verification
+failed; Macker minimums for the fallback wording are `363dc0c` (mount lifecycle) and
+`4527b97` (capability probe).
 `KUBERNETES-PARITY.md` states the node's contract for every core Pod field,
 including the deviations that fail closed and the ones that are simply absent on
 a trusted-native node. Every reconciliation pass:
