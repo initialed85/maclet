@@ -120,17 +120,24 @@ So on that node **no Macker build can enforce a read-only `hostPath` mount**. Th
 is absent (no `mount_nullfs` anywhere, no `null.fs` bundle for `mount(8)` to exec, which is
 what error 72 reports), and the kernel path is closed behind a door root cannot open. The
 measurement that settles it is macker's, reproduced independently by maclet on the same node
-with the same call form (libc `mount()`, which is `mount(2)`, `MNT_RDONLY`, mount data
-`/dev/null` and nil on every name):
+with the same call form (libc `mount()`, which is `mount(2)`, `MNT_RDONLY`, and mount data as a
+`/dev/null` string or as a nil pointer; the third form the probe now adds has not been run on a
+node yet):
 
 ```console
 mount(2), four arguments (type, path, flags, data)
-  type "nullfs"     -> EPERM (1)      both data forms; a vfs entry point refusing
-  type "null"       -> 19             identical to a made-up name "bogusfsxyz"
+  type "nullfs"     -> EPERM (1)      both measured data forms; a vfs entry point refusing
+  type "null"       -> ENODEV (19)    identical to a made-up name "bogusfsxyz"
   type "devfs"      -> mounts, unmounts        (the control that calibrates the probe)
   type apfs         -> EINVAL with a device spec, EFAULT (14) with "/dev/null"
-  type "nfs"        -> 75
+  type "nfs"        -> EPROGMISMATCH (75)
 ```
+
+`bindfs` is the other name worth asking about, and the probe now includes it; it has **not** been
+measured on a node, so its answer is a prediction from source rather than a reading: xnu
+`xnu-12377.121.6:bsd/miscfs/bindfs/bind_vfsops.c:140` opens `bindfs_mount()` with the identical
+entitlement gate under `com.apple.private.bindfs-allow`, so a node that has bindfs built in
+should answer `EPERM` there too.
 
 Two measurement traps live in that table, and they are how this question got argued in two
 directions on one node. macOS `strerror(19)` reads *"Operation not supported by device"*, so
@@ -156,14 +163,17 @@ settled the question used the four-argument form -- the same one that calibrates
 Reading `null` alone therefore settles nothing: it is simply not the registered name, and it
 behaves exactly like an invented one.
 
-The instrument is `test-nullfs-name-probe.c` in this repository, so this claim is checkable on
+The instrument is `tools/nullfs-name-probe.c` in this repository, so this claim is checkable on
 any darwin node rather than a transcript of one:
-`clang -o nullfs-probe test-nullfs-name-probe.c && sudo ./nullfs-probe /tmp/nullfs-probe null
-nullfs bogusfsxyz apfs devfs`. It takes the probe root and the names to ask, prints errno for
-each name with mount data `/dev/null` and with the data pointer nil, and unmounts everything it
-mounted before it exits -- which matters, because an earlier version of this probe used the
-deprecated `syscall()` shim, that raised SIGSYS partway through on arm64, and it died holding
-a `devfs` mount it had just made.
+`clang -o nullfs-probe tools/nullfs-name-probe.c && sudo ./nullfs-probe /tmp/nullfs-probe null
+nullfs bindfs bogusfsxyz apfs devfs`. It takes the probe root and the names to ask, prints the
+errno **number and macro name** for each name under three mount-data forms -- a `/dev/null`
+string, a nil pointer, and a spec built the way xnu reads one (`struct null_mount_conf` then the
+source path) -- and unmounts everything it mounted before it exits, returning nonzero if any
+mount survives it. Printing numbers rather than `strerror` text is the point: 19's comment in
+Apple's header reads like Linux's `ENOTSUP`, and that confusion cost this document two wrong
+conclusions. An earlier version of this probe used the deprecated `syscall()` shim, which raised
+SIGSYS partway through on arm64, and it died holding a `devfs` mount it had just made.
 
 Two corrections to what this document said before, both mine, and they point the same way.
 The registered name on this OS is `nullfs`, not Linux's `null`, so my `ENODEV` for `null`
@@ -173,11 +183,39 @@ evidence proves nothing either: `vfs.generic` is a tunable namespace, not the mo
 it lists 119 names and omits `devfs`, which demonstrably mounts -- so its absence cannot
 adjudicate whether a filesystem is registered.
 
-What the `EPERM` does establish, and it matches Apple's source for `xnu-12377.121.6` (the
-generation matching Darwin 25): `bsd/miscfs/nullfs/` is built into this kernel, and
+What the `EPERM` does establish, and it matches Apple's source at tag `xnu-12377.121.6`
+(the generation matching Darwin 25), read directly from `apple-oss-distributions/xnu`:
+`bsd/miscfs/nullfs/` is built into this kernel, and
 `nullfs_mount()` opens with
 `if (!IOCurrentTaskHasEntitlement("com.apple.private.nullfs_allow")) return EPERM;` **with no
-superuser fallback**, forcing `MNT_RDONLY` on every mount. The filesystem is present and
+superuser fallback**, forcing `MNT_RDONLY` on every mount. Three details from that file are
+worth carrying, because each one is a way to misread a probe:
+
+- the gate sits at line 142, **before** any `copyin` of mount data, which is why `EPERM` arrives
+  with the data pointer nil too and cannot be blamed on a malformed spec. The corollary is that a
+  well-formed spec buys nothing, and the probe's new `conf+path` pass exists to show that on a
+  node rather than by reading this file;
+- mount data is not a string there. `nullfs_mount` `copyin`s a `struct null_mount_conf`
+  (`{ uint64_t flags; }`) and then `copyinstr`s the source path from
+  `user_data + sizeof(conf)`, so the spec this filesystem wants is a conf followed by a path,
+  not a `fstype=…,from=…` string. `MNT_RDONLY` is forced, not requested; and
+- `bindfs` -- `bsd/miscfs/bindfs/`, present in the same tree and also a nullfs derivative --
+  opens its mount with the identical gate under `com.apple.private.bindfs-allow`. So there is
+  no second filesystem to route around: both bind-mount VFSes on this OS are entitlement-gated,
+  and no third-party binary can hold either.
+
+That errno naming needs pinning too, because an intermediate Macker build published the wrong
+version of it and maclet carries a runtime `reason` verbatim. Apple's own
+`bsd/sys/errno.h` at `xnu-12377.121.6` numbers `ENODEV` 19 -- commented *"Operation not
+supported by device"*, which is why a probe printing `strerror` text reads like Linux's
+`ENOTSUP` -- and `ENOTSUP` 45, with `EOPNOTSUPP` aliased to `ENOTSUP` under the full C level.
+Linux, on the same question, is `ENODEV` 19, `ENOTSUP` = `EOPNOTSUPP` 95, `EOVERFLOW` 75, and
+has no `EPROGMISMATCH` at all; Darwin's `EPROGMISMATCH` is 75, which is the number `nfs`
+returned above. So **19 is `ENODEV` on both OSes, and only `ENOTSUP` moves**. Any statement that
+"19 on Darwin is `ENOTSUP`", or that Linux "numbers 19 the other way round", is false; Macker
+corrected its own copy of that claim in `ff7b159`, and a node still running a build from before
+it will publish the wrong sentence inside its Pod `reason`.
+The filesystem is present and
 reachable only by a process holding a private entitlement no third-party binary can acquire:
 no helper path, no `MACKER_MOUNT_NULLFS` override, and no amount of `sudo` produces the
 read-only view a `readOnly` volume asks for. maclet turns that into an admission refusal

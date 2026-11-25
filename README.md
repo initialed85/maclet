@@ -426,12 +426,16 @@ after 5 minutes, so a Macker upgrade heals a joined node) and then checking that
 the OS provides nullfs -- a helper (`/sbin/mount_nullfs`, `/sbin/mount_null`), a
 `null.fs` mount bundle, or the `vfs.generic.nullfs` kernel feature. Both must
 answer yes before `:ro` is passed through, because the marker describes Macker's
-argument grammar, not the kernel underneath it: macOS 26 / Darwin 25.6 arm64
-ships no nullfs at all -- home-ops measured `mount(2)` fstype `null` returning
-`ENODEV`, the same class as a bogus filesystem name, so the VFS is not even
-registered -- and no Macker build can enforce a read-only hostPath mount there.
-maclet refuses such a Pod at admission instead of launching it into a mount
-failure. Where nullfs does exist, Macker enforces a node-wide
+argument grammar, not the kernel underneath it: on macOS 26 / Darwin 25.6 arm64
+the filesystem *is* registered, under the type name `nullfs` (the Linux name
+`null` is what answers `ENODEV`, exactly as a made-up name does), and `mount(2)`
+for `nullfs` returns `EPERM` even as root -- xnu's `nullfs_mount()` refuses any
+task without the private entitlement `com.apple.private.nullfs_allow`, with no
+superuser fallback, and `bindfs` is gated the same way under
+`com.apple.private.bindfs-allow`, so there is no second filesystem to route
+around it. No Macker build, at any uid, can enforce a read-only hostPath mount
+there. maclet refuses such a Pod at admission instead of launching it into a
+mount failure. Where nullfs does exist, Macker enforces a node-wide
 read-only nullfs mount, and read-only means writes through that mount fail with
 `EROFS`; it is not containment, because a darwin-native workload runs without
 `chroot` and can open the same host path directly with its own host permissions.

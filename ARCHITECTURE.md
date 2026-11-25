@@ -299,8 +299,10 @@ helper, a `null.fs` mount bundle, or the `vfs.generic.nullfs` kernel feature). M
 node-operator checklist, so maclet logs it and keeps it out of the Pod's status. Macker
 then enforces a node-wide read-only nullfs mount for the volume's lifetime (privileged,
 like PF and NFS). The fallbacks matter because the marker is argument grammar, not a
-kernel measurement: macOS 26 /
-Darwin 25.6 arm64 ships no nullfs, so there `readOnly` hostPath mounts are refused
+kernel measurement: on macOS 26 /
+Darwin 25.6 arm64 `nullfs` is registered but xnu's `nullfs_mount()` refuses every
+task without the private entitlement `com.apple.private.nullfs_allow`, with no
+superuser fallback, so `readOnly` hostPath mounts are refused
 at admission rather than launched into a mount failure, and enforced read-only
 comes from a `readOnly` PersistentVolumeClaim mounted host-side with
 `mount_nfs -o ro`. Read-only is a

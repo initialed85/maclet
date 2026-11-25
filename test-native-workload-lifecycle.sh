@@ -370,7 +370,8 @@ if [[ "$MACLET_TEST_READ_ONLY" == "true" ]]; then
   # Two legitimate outcomes, and the difference between them is the node's OS.
   # Where nullfs exists the mount is enforced and the Pod serves its content
   # read-only. Where it cannot (macOS 26 gates nullfs behind a private entitlement with no
-  # superuser fallback, and on this build mount(2) reports ENODEV for the type) maclet
+  # superuser fallback, so mount(2) for the registered type `nullfs` answers EPERM even as
+  # root, while the Linux name `null` answers ENODEV the way a bogus name does) maclet
   # refuses the Pod at admission rather than run that mount writable. Either way maclet
   # must never start a :ro mount it cannot enforce.
   RO_REFUSED=false
