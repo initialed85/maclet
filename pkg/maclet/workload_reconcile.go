@@ -336,9 +336,16 @@ func (m *workloadManager) reconcile(ctx context.Context, client *APIClient, pods
 			}
 			reconcileErrors = append(reconcileErrors, fmt.Errorf("prepare Macker workload %s/%s: %w", pod.ObjectMeta.Namespace, pod.ObjectMeta.Name, err))
 			managed.RetryAfter = time.Now().Add(workloadRetryDelay)
-			// Keep invalid configuration Pending so ReplicaSets do not treat the
-			// Pod as dead and create another copy on every reconciliation.
-			_ = m.updateStatus(ctx, client, pod, "Pending", ip, "MacletMackerLaunchFailed", err.Error(), false, managed.RestartCount)
+			// A manifest this node class refuses is a configuration error, the way
+			// kubelet reports one; only an inability to reach the host path is a
+			// runtime failure worth retrying. Both stay Pending so a ReplicaSet does
+			// not treat the Pod as dead and create another copy every reconciliation.
+			reason := "MacletUnsupportedPod"
+			var refusal *manifestRefusal
+			if !errors.As(err, &refusal) {
+				reason = "MacletMackerLaunchFailed"
+			}
+			_ = m.updateStatus(ctx, client, pod, "Pending", ip, reason, err.Error(), false, managed.RestartCount)
 			continue
 		}
 		if len(managed.NFSMounts) > 0 {

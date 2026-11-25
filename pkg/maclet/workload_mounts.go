@@ -148,6 +148,21 @@ func mackerHelpAdvertisesReadOnlyVolumes(help string) bool {
 	return strings.Contains(help, mackerReadOnlyVolumeMarker)
 }
 
+// manifestRefusal marks an error whose cause is the Pod manifest rather than the
+// node: maclet's parity policy refuses the shape outright. Reconcile reports
+// these as MacletUnsupportedPod, which clients see as CreateContainerConfigError
+// -- the signal kubelet gives for a container a node cannot configure -- instead
+// of RunContainerError, which means the runtime tried to launch it and failed.
+type manifestRefusal struct {
+	message string
+}
+
+func (e *manifestRefusal) Error() string { return e.message }
+
+func refuseManifest(format string, args ...any) error {
+	return &manifestRefusal{message: fmt.Sprintf(format, args...)}
+}
+
 func mackerVolumeArgs(pod Pod, container ContainerSpec, readOnlySupported bool) ([]string, error) {
 	volumes := make(map[string]string, len(pod.Spec.Volumes))
 	volumeTypes := make(map[string]string, len(pod.Spec.Volumes))
@@ -156,7 +171,7 @@ func mackerVolumeArgs(pod Pod, container ContainerSpec, readOnlySupported bool) 
 			continue
 		}
 		if _, exists := volumeTypes[volume.Name]; exists {
-			return nil, fmt.Errorf("Pod volume %q is declared more than once", volume.Name)
+			return nil, refuseManifest("Pod volume %q is declared more than once", volume.Name)
 		}
 		if volume.HostPath == nil {
 			volumeTypes[volume.Name] = ""
@@ -182,37 +197,37 @@ func mackerVolumeArgs(pod Pod, container ContainerSpec, readOnlySupported bool) 
 			continue
 		}
 		if mount.Name == "" {
-			return nil, fmt.Errorf("volume mount at %q has no volume name", mount.MountPath)
+			return nil, refuseManifest("volume mount at %q has no volume name", mount.MountPath)
 		}
 		if mount.MountPath == "" || !filepath.IsAbs(mount.MountPath) {
-			return nil, fmt.Errorf("volume mount %q must use an absolute mountPath", mount.MountPath)
+			return nil, refuseManifest("volume mount %q must use an absolute mountPath", mount.MountPath)
 		}
 		mountPath := filepath.Clean(mount.MountPath)
 		if _, exists := seenMountPaths[mountPath]; exists {
-			return nil, fmt.Errorf("volume mount path %q is declared more than once", mountPath)
+			return nil, refuseManifest("volume mount path %q is declared more than once", mountPath)
 		}
 		seenMountPaths[mountPath] = struct{}{}
 		if mount.ReadOnly {
 			if !readOnlySupported {
-				return nil, fmt.Errorf("volume mount %q requests readOnly, but this Macker binary does not advertise %q, so its hostPath volumes stay writable live symlinks; upgrade Macker or drop readOnly (see KUBERNETES-PARITY.md)", mountPath, mackerReadOnlyVolumeMarker)
+				return nil, refuseManifest("volume mount %q requests readOnly, but this Macker binary does not advertise %q, so its hostPath volumes stay writable live symlinks; upgrade Macker or drop readOnly (see KUBERNETES-PARITY.md)", mountPath, mackerReadOnlyVolumeMarker)
 			}
 		}
 		if mount.SubPathExpr != "" {
-			return nil, fmt.Errorf("volume mount %q uses subPathExpr, which maclet does not support", mountPath)
+			return nil, refuseManifest("volume mount %q uses subPathExpr, which maclet does not support", mountPath)
 		}
 		hostPath, exists := volumes[mount.Name]
 		if !exists {
 			if _, declared := volumeTypes[mount.Name]; declared {
-				return nil, fmt.Errorf("volume %q is not a supported hostPath volume", mount.Name)
+				return nil, refuseManifest("volume %q is not a supported hostPath volume", mount.Name)
 			}
-			return nil, fmt.Errorf("volume mount %q references unknown volume %q", mountPath, mount.Name)
+			return nil, refuseManifest("volume mount %q references unknown volume %q", mountPath, mount.Name)
 		}
 		resolvedPath, err := resolveVolumeSubPath(hostPath, mount.SubPath)
 		if err != nil {
 			return nil, fmt.Errorf("volume mount %q: %w", mountPath, err)
 		}
 		if strings.Contains(resolvedPath, ":") || strings.Contains(mountPath, ":") {
-			return nil, fmt.Errorf("volume mount %q cannot be passed to Macker because its path contains ':'", mountPath)
+			return nil, refuseManifest("volume mount %q cannot be passed to Macker because its path contains ':'", mountPath)
 		}
 
 		spec := resolvedPath + ":" + mountPath
@@ -226,7 +241,7 @@ func mackerVolumeArgs(pod Pod, container ContainerSpec, readOnlySupported bool) 
 				return nil, fmt.Errorf("volume mount %q: %w", mountPath, err)
 			}
 			if !info.IsDir() {
-				return nil, fmt.Errorf("volume mount %q requests readOnly on %q, which is not a directory: macOS mount_nullfs cannot mount a single file read-only, so mount the containing directory with subPath and point the mount at it", mountPath, resolvedPath)
+				return nil, refuseManifest("volume mount %q requests readOnly on %q, which is not a directory: macOS mount_nullfs cannot mount a single file read-only, so mount the containing directory with subPath and point the mount at it", mountPath, resolvedPath)
 			}
 			spec += ":ro"
 		}
@@ -252,7 +267,7 @@ func (m *workloadManager) runArgsWithContext(ctx context.Context, pod Pod, conta
 	workingDir := ""
 	if container.WorkingDir != "" {
 		if !filepath.IsAbs(container.WorkingDir) {
-			return nil, fmt.Errorf("container %q workingDir %q must be an absolute path", container.Name, container.WorkingDir)
+			return nil, refuseManifest("container %q workingDir %q must be an absolute path", container.Name, container.WorkingDir)
 		}
 		workingDir = filepath.Clean(container.WorkingDir)
 	}
@@ -302,17 +317,17 @@ func (m *workloadManager) runArgsWithContext(ctx context.Context, pod Pod, conta
 	portForward := pod.ObjectMeta.Annotations[nativeDisablePortForwardAnnotation] != "true"
 	for index, port := range container.Ports {
 		if port.HostPort != 0 {
-			return nil, fmt.Errorf("container port %d requests hostPort %d; maclet does not support host-port mapping yet", port.ContainerPort, port.HostPort)
+			return nil, refuseManifest("container port %d requests hostPort %d; maclet does not support host-port mapping yet", port.ContainerPort, port.HostPort)
 		}
 		if port.ContainerPort < 1 || port.ContainerPort > 65535 {
-			return nil, fmt.Errorf("container port %d is outside the valid range", port.ContainerPort)
+			return nil, refuseManifest("container port %d is outside the valid range", port.ContainerPort)
 		}
 		protocol := strings.ToUpper(string(port.Protocol))
 		if protocol == "" {
 			protocol = "TCP"
 		}
 		if protocol != "TCP" && protocol != "UDP" {
-			return nil, fmt.Errorf("container port %d uses unsupported protocol %q", port.ContainerPort, port.Protocol)
+			return nil, refuseManifest("container port %d uses unsupported protocol %q", port.ContainerPort, port.Protocol)
 		}
 		// Macker allocates a unique process port and PF-redirects PodIP:port
 		// to it, allowing overlapping rollout generations. An explicitly
@@ -350,7 +365,7 @@ func (m *workloadManager) hostNetworkRunArgs(ctx context.Context, pod Pod, conta
 	workingDir := ""
 	if container.WorkingDir != "" {
 		if !filepath.IsAbs(container.WorkingDir) {
-			return nil, fmt.Errorf("container %q workingDir %q must be an absolute path", container.Name, container.WorkingDir)
+			return nil, refuseManifest("container %q workingDir %q must be an absolute path", container.Name, container.WorkingDir)
 		}
 		workingDir = filepath.Clean(container.WorkingDir)
 	}
@@ -373,17 +388,17 @@ func (m *workloadManager) hostNetworkRunArgs(ctx context.Context, pod Pod, conta
 	portForward := pod.ObjectMeta.Annotations[nativeDisablePortForwardAnnotation] != "true"
 	for index, port := range container.Ports {
 		if port.HostPort != 0 {
-			return nil, fmt.Errorf("container port %d requests hostPort %d; maclet does not support host-port mapping yet", port.ContainerPort, port.HostPort)
+			return nil, refuseManifest("container port %d requests hostPort %d; maclet does not support host-port mapping yet", port.ContainerPort, port.HostPort)
 		}
 		if port.ContainerPort < 1 || port.ContainerPort > 65535 {
-			return nil, fmt.Errorf("container port %d is outside the valid range", port.ContainerPort)
+			return nil, refuseManifest("container port %d is outside the valid range", port.ContainerPort)
 		}
 		protocol := strings.ToUpper(string(port.Protocol))
 		if protocol == "" {
 			protocol = "TCP"
 		}
 		if protocol != "TCP" && protocol != "UDP" {
-			return nil, fmt.Errorf("container port %d uses unsupported protocol %q", port.ContainerPort, port.Protocol)
+			return nil, refuseManifest("container port %d uses unsupported protocol %q", port.ContainerPort, port.Protocol)
 		}
 		if portForward {
 			args = append(args, "-p", fmt.Sprintf("%d:auto/%s", port.ContainerPort, strings.ToLower(protocol)))

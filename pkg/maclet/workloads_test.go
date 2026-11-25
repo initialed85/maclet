@@ -344,6 +344,59 @@ func TestMackerVolumeArgsPassesReadOnlyWhenMackerSupportsIt(t *testing.T) {
 	}
 }
 
+func TestVolumeArgRefusalsAreClassifiedAsManifestConfig(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "html")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(root, "config.txt")
+	if err := os.WriteFile(file, []byte("config"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dirPod := Pod{Spec: PodSpec{Volumes: []Volume{testHostPathVolume("data", dir, "Directory")}}}
+	filePod := Pod{Spec: PodSpec{Volumes: []Volume{testHostPathVolume("config", file, "File")}}}
+	// Nothing creates this path, so failing on it is the node's problem.
+	missingPod := Pod{Spec: PodSpec{Volumes: []Volume{testHostPathVolume("gone", filepath.Join(root, "gone"), "Directory")}}}
+
+	refusals := []struct {
+		name      string
+		pod       Pod
+		mounts    []VolumeMount
+		supported bool
+	}{
+		{"readOnly without runtime support", dirPod, []VolumeMount{{Name: "data", MountPath: "/data", ReadOnly: true}}, false},
+		{"readOnly on a single file", filePod, []VolumeMount{{Name: "config", MountPath: "/etc/config.txt", ReadOnly: true}}, true},
+		{"subPathExpr", dirPod, []VolumeMount{{Name: "data", MountPath: "/data", SubPathExpr: "$(POD_NAME)"}}, true},
+		{"duplicate mount path", dirPod, []VolumeMount{{Name: "data", MountPath: "/data"}, {Name: "data", MountPath: "/data"}}, true},
+		{"unknown volume", dirPod, []VolumeMount{{Name: "nope", MountPath: "/data"}}, true},
+		{"relative mountPath", dirPod, []VolumeMount{{Name: "data", MountPath: "data"}}, true},
+	}
+	for _, tc := range refusals {
+		_, err := mackerVolumeArgs(tc.pod, ContainerSpec{VolumeMounts: tc.mounts}, tc.supported)
+		if err == nil {
+			t.Fatalf("%s: expected a refusal", tc.name)
+		}
+		var refusal *manifestRefusal
+		if !errors.As(err, &refusal) {
+			t.Fatalf("%s: error = %v, want a manifestRefusal so it reports as CreateContainerConfigError", tc.name, err)
+		}
+		// The message is what an operator reads, so the wrapper must not swallow it.
+		if strings.TrimSpace(refusal.Error()) == "" {
+			t.Fatalf("%s: refusal message is empty", tc.name)
+		}
+	}
+
+	_, err := mackerVolumeArgs(missingPod, ContainerSpec{VolumeMounts: []VolumeMount{{Name: "gone", MountPath: "/gone"}}}, true)
+	if err == nil {
+		t.Fatal("missing hostPath directory: expected an error")
+	}
+	var refusal *manifestRefusal
+	if errors.As(err, &refusal) {
+		t.Fatalf("missing hostPath directory should stay a runtime failure, got a refusal: %v", err)
+	}
+}
+
 func TestMackerReadOnlyVolumeCapabilityProbe(t *testing.T) {
 	help := "  -v value\n    \thost path and container path, HOST:CONTAINER[:ro] (repeatable)\n"
 	if !mackerHelpAdvertisesReadOnlyVolumes(help) {

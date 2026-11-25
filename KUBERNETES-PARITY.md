@@ -104,6 +104,33 @@ what a Linux reader assumes:
 | `workingDir`, `command`, `args` | Supported, passed to Macker |
 | `restartPolicy` | `Always`, `OnFailure`, `Never` are all handled; a succeeded/failed Pod is not resurrected against a non-`Always` policy |
 
+## How a refusal surfaces
+
+A Pod a maclet node cannot run stays `Pending`. `spec.reason` on the Pod is left
+empty by design (the phase is canonical); the detail is on the first container's
+waiting state, and it distinguishes the two kinds of "cannot":
+
+| Waiting reason | Meaning | maclet internal reason |
+| --- | --- | --- |
+| `CreateContainerConfigError` | The **manifest** asks for something this node class refuses — a policy decision, retrying will not help | `MacletUnsupportedPod` |
+| `RunContainerError` | The node could not carry the Pod out — Macker failed to launch, or the host path was unreachable | `MacletMackerLaunchFailed` |
+
+Before 2026-11-25 both were reported as `RunContainerError`, which read as "the
+runtime crashed" and invited a retry loop rather than a manifest change.
+
+Measured on `icarus-2.local` on 2026-11-25, from the node's own status message:
+
+```console
+macker run --detach ... -v /tmp/maclet-ro-check-251125:/var/run:ro -p 8080:auto/tcp
+  docker.io/initialed85/nginx:latest: exit status 1
+error: mount_nullfs was not found; it ships with macOS
+```
+
+That is the stance working as intended on a half-upgraded node: maclet forwarded
+`:ro` because the installed Macker advertises the marker, Macker could not
+perform the mount, and the Pod stayed `Pending` — it was never run with the
+sensitive tree writable. The fix is in the runtime, not the manifest.
+
 ## Volume sources
 
 | Source | On a maclet node |
