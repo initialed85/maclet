@@ -39,46 +39,49 @@ runtime.
 ## Volume semantics
 
 `readOnly: true` on a `hostPath` volume mount is the field this document exists
-because of. Measured on `icarus-2.local` on 2026-11-25:
+because of. It is honoured on a maclet node whenever the installed Macker can
+enforce it, and refused when it cannot — never quietly dropped.
 
-| Pod | Result |
-| --- | --- |
-| `hostPath` `DirectoryOrCreate`, mount `readOnly` omitted | `Running` — "Macker is running the trusted native workload" |
-| same, mount `readOnly: true` | `Pending` — `volume mount "/var/run" requests readOnly, but this Macker binary does not advertise "HOST:CONTAINER[:ro]" ...` |
+Macker's volume primitive is a symlink from the container rootfs to the live host
+path (`installVolume` → `os.Symlink(mount.HostPath, target)`), and a symlink
+carries no write restriction. Read-only is therefore enforced below the symlink:
+a recent Macker maps a `:ro` volume with `mount_nullfs -o ro`, so create,
+modify, and unlink inside the mount fail with `EROFS` for the workload process.
+maclet negotiates that capability:
 
-The reason is a Macker primitive, not a maclet choice. Macker implements `-v` by
-creating a symlink inside the container rootfs that points at the live host path
-(`installVolume` → `os.Symlink(mount.HostPath, target)`), and its volume parser
-accepts exactly two fields, `HOST:CONTAINER` (`parseVolume`). The workload is
-then launched as an ordinary host process. A symlink carries no write
-restriction, so there is nothing for maclet to set that the kernel would
-enforce: the container process and the host process are the same process.
+- maclet asks the installed Macker whether `macker run --help` advertises the
+  marker `HOST:CONTAINER[:ro]`. The answer is cached; a negative answer is
+  re-probed after 5 minutes, so upgrading Macker heals an already-joined node
+  without restarting maclet.
+- **Advertised:** `readOnly` is passed through as `-v HOST:CONTAINER:ro`.
+- **Not advertised:** the Pod is refused with a message naming the marker, and
+  maclet never sends `:ro` to a binary that would ignore it. An older Macker
+  fails mid-start on a three-field spec, which is worse than a `Pending` Pod.
 
-maclet therefore negotiates it:
+The one shape read-only cannot cover is a **single file**. macOS
+`mount_nullfs` mounts directory subtrees, not files, so maclet refuses a
+`readOnly` mount whose resolved host path is not a directory — including the
+`hostPath type: File` case and the `subPath` of a directory that lands on a file
+— and says so at admission rather than letting the mount fail inside the
+container. The portable manifest rewrite is to mount the containing directory
+read-only and address the file inside it.
 
-- maclet asks the installed Macker binary whether it advertises the marker
-  `HOST:CONTAINER[:ro]` in `macker run --help`. The answer is cached; a negative
-  answer is re-probed after 5 minutes so upgrading Macker heals a node that is
-  already joined, without restarting maclet.
-- **Advertised:** maclet passes `readOnly` through as `-v HOST:CONTAINER:ro` and
-  the runtime enforces it for the workload process.
-- **Not advertised:** maclet refuses the Pod with the message above. It never
-  sends `:ro` to a binary that would either reject the spec or, worse, accept and
-  ignore it.
-
-Read-only state that maclet *can* enforce today is enforced outside Macker:
+Read-only state that maclet enforces outside Macker:
 
 - `PersistentVolumeClaim` volumes are mounted on the host through `mount_nfs`,
-  so a `readOnly` PVC really is read-only at the host mount, whatever Macker does.
+  so a `readOnly` PVC is read-only at the host mount regardless of Macker.
 - `configMap` volumes are materialized into a per-Pod directory owned by maclet.
   Writes by the workload stay in that copy and never reach the Kubernetes
-  ConfigMap. Until Macker advertises `:ro`, such a mount is passed writable and
-  the copy is what protects the API object; once `:ro` is advertised, maclet
-  requests it too.
+  ConfigMap; once `:ro` is available maclet asks for it on that directory too.
 
-If your policy is "mount sensitive trees read-only", on a maclet node that
-policy currently cannot hold: it fails closed instead of pretending, and the
-fix lives in Macker, not in a manifest.
+Two properties of the enforcement are worth stating plainly, because they are not
+what a Linux reader assumes:
+
+- Read-only volumes need root or passwordless `sudo` on the node, the same
+  privilege maclet already needs for PF mappings and NFS mounts.
+- The nullfs mount is **node-wide for the mount's lifetime**, not per-process
+  sandboxing. It is the right primitive for a `readOnly` volume; it is not
+  isolation, and rule 4 below still holds.
 
 ## Pod and scheduling semantics
 
@@ -105,7 +108,7 @@ fix lives in Macker, not in a manifest.
 
 | Source | On a maclet node |
 | --- | --- |
-| `hostPath` (`Directory`, `DirectoryOrCreate`, `File`, `FileOrCreate`) | Supported, writable live symlink; `readOnly` per the negotiation above |
+| `hostPath` (`Directory`, `DirectoryOrCreate`, `File`, `FileOrCreate`) | Supported, writable live symlink; `readOnly` honoured on directories, refused on single files |
 | `hostPath` with no `type` | Supported when the path already exists |
 | `hostPath` `Socket`, `CharDevice`, `BlockDevice` | Validated as the right object kind, then passed through |
 | `configMap` | Supported (`items`, `defaultMode`, `binaryData`, `optional`), refreshed in place without a restart |
@@ -116,13 +119,15 @@ fix lives in Macker, not in a manifest.
 
 ## Verifying it from the cluster
 
-The probe that produced the table above (namespace and paths are disposable):
+Three probes, all against the darwin nginx image (`test-native-workload-lifecycle.sh`
+runs them as part of the lifecycle pass on a Mac node). Namespace and host paths
+are disposable.
 
 ```yaml
 apiVersion: v1
 kind: Pod
 metadata:
-  name: ro-on
+  name: ro-write
   labels:
     k8s-darwin.dev/native: "true"
 spec:
@@ -140,14 +145,26 @@ spec:
         - {name: run, mountPath: /var/run, readOnly: true}
 ```
 
-Duplicate it with `readOnly: true` removed. Expect: the writable Pod reaches
-`Running`; the `readOnly` Pod stays `Pending` with the message quoted above, or,
-on a node whose Macker advertises `HOST:CONTAINER[:ro]`, reaches `Running` and
-then *fails to start nginx*, because nginx writes its PID file into `/var/run`
-and the mount is genuinely read-only. That last inversion is the acceptance
-check for read-only enforcement: the same Pod must not be able to run both a
-write-requiring and a write-denying workload.
+nginx writes its PID file into `/var/run`, so this Pod is a write test that needs
+no shell in the image:
 
-`test-native-workload-lifecycle.sh` covers the writable `hostPath` lifecycle
+1. **`ro-write`** (`readOnly: true` at a path the workload must write): on a node
+   whose Macker advertises `HOST:CONTAINER[:ro]` the workload must **not** come up
+   — nginx dies on `EROFS`. If it reaches `Running`, read-only is theatre. On an
+   older Macker it stays `Pending` with a message naming the marker.
+2. **`ro-read`** (same volume, mounted at the document root
+   `/usr/share/nginx/html` with `readOnly: true`): must reach `Running` and serve
+   the host file, proving `readOnly` is not simply "unusable".
+3. **`ro-off`** (identical to `ro-write` with `readOnly` removed): must reach
+   `Running`. The pair with `ro-write` is the inversion that makes the guarantee
+   meaningful — the same process, denied by one field.
+
+A `hostPath` of type `File` (or a `subPath` that resolves to a file) with
+`readOnly: true` never reaches the runtime at all: maclet refuses it during
+reconciliation with "not a directory: macOS mount_nullfs cannot mount a single
+file read-only".
+
+`test-native-workload-lifecycle.sh` also covers the writable `hostPath` lifecycle
 against a real cluster, including that an invalid volume rollout leaves the Pod
-`Pending` rather than terminal.
+`Pending` rather than terminal, so a ReplicaSet does not stream replacements
+against a manifest the node cannot run.

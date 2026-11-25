@@ -302,6 +302,13 @@ func TestMackerVolumeArgsPassesReadOnlyWhenMackerSupportsIt(t *testing.T) {
 	if err := os.Mkdir(volume, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(volume, "file.txt"), []byte("secret"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	config := filepath.Join(root, "config.txt")
+	if err := os.WriteFile(config, []byte("config"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	pod := Pod{Spec: PodSpec{Volumes: []Volume{testHostPathVolume("data", volume, "Directory")}}}
 	container := ContainerSpec{VolumeMounts: []VolumeMount{
 		{Name: "data", MountPath: "/data", ReadOnly: true},
@@ -314,6 +321,26 @@ func TestMackerVolumeArgsPassesReadOnlyWhenMackerSupportsIt(t *testing.T) {
 	want := []string{"-v", volume + ":/data:ro", "-v", volume + ":/rw"}
 	if got := strings.Join(args, "\x00"); got != strings.Join(want, "\x00") {
 		t.Fatalf("mackerVolumeArgs(readOnly supported) = %#v, want %#v", args, want)
+	}
+
+	// A single file cannot be a read-only nullfs mount, so maclet must say so at
+	// admission rather than letting Macker fail while mounting the workload.
+	readOnlyFile := Pod{Spec: PodSpec{Volumes: []Volume{testHostPathVolume("config", config, "File")}}}
+	if _, err := mackerVolumeArgs(readOnlyFile, ContainerSpec{VolumeMounts: []VolumeMount{{Name: "config", MountPath: "/etc/config.txt", ReadOnly: true}}}, true); err == nil || !strings.Contains(err.Error(), "not a directory") {
+		t.Fatalf("readOnly File mount error = %v, want a not-a-directory rejection", err)
+	}
+	// The same manifest without readOnly stays a plain writable symlink.
+	args, err = mackerVolumeArgs(readOnlyFile, ContainerSpec{VolumeMounts: []VolumeMount{{Name: "config", MountPath: "/etc/config.txt"}}}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"-v", config + ":/etc/config.txt"}; strings.Join(args, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("writable File mount args = %#v, want %#v", args, want)
+	}
+
+	// A subPath of a Directory that resolves to a file is the same trap.
+	if _, err := mackerVolumeArgs(pod, ContainerSpec{VolumeMounts: []VolumeMount{{Name: "data", MountPath: "/file", SubPath: "file.txt", ReadOnly: true}}}, true); err == nil || !strings.Contains(err.Error(), "not a directory") {
+		t.Fatalf("readOnly subPath-file error = %v, want a not-a-directory rejection", err)
 	}
 }
 

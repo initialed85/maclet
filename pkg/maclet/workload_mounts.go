@@ -217,6 +217,17 @@ func mackerVolumeArgs(pod Pod, container ContainerSpec, readOnlySupported bool) 
 
 		spec := resolvedPath + ":" + mountPath
 		if mount.ReadOnly {
+			// macOS mount_nullfs makes a directory subtree read-only; it cannot
+			// mount a single file that way, so Macker would fail mid-start. maclet
+			// refuses the manifest at admission instead, including the case where a
+			// subPath of a Directory resolves to a file.
+			info, err := os.Stat(resolvedPath)
+			if err != nil {
+				return nil, fmt.Errorf("volume mount %q: %w", mountPath, err)
+			}
+			if !info.IsDir() {
+				return nil, fmt.Errorf("volume mount %q requests readOnly on %q, which is not a directory: macOS mount_nullfs cannot mount a single file read-only, so mount the containing directory with subPath and point the mount at it", mountPath, resolvedPath)
+			}
 			spec += ":ro"
 		}
 		args = append(args, "-v", spec)

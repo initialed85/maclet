@@ -12,6 +12,10 @@ IMAGE=${MACLET_TEST_IMAGE:-docker.io/initialed85/nginx:latest}
 # Linux cluster node (for example edward@192.168.1.111) to validate the full
 # PodIP:declared-port path through Flannel and PF.
 MACLET_TEST_REMOTE=${MACLET_TEST_REMOTE:-}
+# The read-only volume stage needs a Macker that can enforce :ro, so it is
+# opt-in until a node is known to have one. Set it to true to assert that a
+# readOnly mount really denies writes and still serves reads.
+MACLET_TEST_READ_ONLY=${MACLET_TEST_READ_ONLY:-false}
 TEST_PORT=${MACLET_TEST_PORT:-8080}
 MAX_UNAVAILABLE=0
 MAX_SURGE=1
@@ -71,6 +75,62 @@ EOF
             - name: index-html
               mountPath: /usr/share/nginx/html/index.html
               subPath: index.html
+EOF
+)
+      ;;
+    # A writable mount at the directory the workload must write. This is the
+    # control for the readOnly stage below: the same Pod, one field apart.
+    writable-run)
+      volume_yaml=$(cat <<EOF
+      volumes:
+        - name: run-dir
+          hostPath:
+            path: $HOST_DIR/run
+            type: DirectoryOrCreate
+EOF
+)
+      mount_yaml=$(cat <<'EOF'
+          volumeMounts:
+            - name: run-dir
+              mountPath: /var/run
+EOF
+)
+      ;;
+    # nginx writes its PID file into /var/run, so a read-only mount there is a
+    # write test that needs no shell in the image.
+    ro-write)
+      volume_yaml=$(cat <<EOF
+      volumes:
+        - name: run-dir
+          hostPath:
+            path: $HOST_DIR/run
+            type: DirectoryOrCreate
+EOF
+)
+      mount_yaml=$(cat <<'EOF'
+          volumeMounts:
+            - name: run-dir
+              mountPath: /var/run
+              readOnly: true
+EOF
+)
+      ;;
+    # readOnly must not mean unusable: serving content out of a read-only
+    # document root is the expected success case.
+    ro-read)
+      volume_yaml=$(cat <<EOF
+      volumes:
+        - name: html-dir
+          hostPath:
+            path: $HOST_DIR
+            type: Directory
+EOF
+)
+      mount_yaml=$(cat <<'EOF'
+          volumeMounts:
+            - name: html-dir
+              mountPath: /usr/share/nginx/html
+              readOnly: true
 EOF
 )
       ;;
@@ -178,6 +238,31 @@ wait_one_pending() {
   return 1
 }
 
+# wait_never_ready is the readOnly invariant: the workload is never Ready, and
+# the Pod is not replaced in a storm. The phase itself is whatever the runtime
+# reports for a process that cannot write its own state, so it is not asserted.
+wait_never_ready() {
+  local deadline=$((SECONDS + 60))
+  sleep 20
+  if (( $(pod_count) > 2 )); then
+    echo "read-only volume rollout created a replacement storm" >&2
+    "${K[@]}" -n "$NAMESPACE" get pods -o wide || true
+    return 1
+  fi
+  local ready
+  ready=$("${K[@]}" -n "$NAMESPACE" get pods -l "app=$APP" \
+    -o jsonpath='{range .items[*]}{.status.phase}{"/"}{range .status.conditions[?(@.type=="Ready")]}{.status}{end}{"\n"}{end}' \
+    2>/dev/null | awk '$0 == "Running/True" { count++ } END { print count+0 }')
+  if [[ "$ready" != 0 ]]; then
+    echo "a workload denied write access became Ready; readOnly is not enforced" >&2
+    return 1
+  fi
+  while (( SECONDS < deadline )); do
+    sleep 2
+  done
+  return 0
+}
+
 "${K[@]}" create namespace "$NAMESPACE" >/dev/null
 
 # Initial create and rollout.
@@ -224,6 +309,35 @@ fi
 render base three | "${K[@]}" apply -f - >/dev/null
 wait_rollout
 wait_single_ready
+
+# Read-only volume semantics. This stage needs a Macker that advertises
+# HOST:CONTAINER[:ro] and a maclet that passes it through; against an older
+# runtime the first apply below is rejected and the Pod simply stays Pending with
+# the marker named in its message, which is the fail-closed behaviour.
+if [[ "$MACLET_TEST_READ_ONLY" == "true" ]]; then
+  render writable-run rw-control | "${K[@]}" apply -f - >/dev/null
+  wait_rollout
+  wait_single_ready
+
+  render ro-write ro-denied | "${K[@]}" apply -f - >/dev/null
+  wait_never_ready
+  "${K[@]}" -n "$NAMESPACE" delete deployment "$APP" --wait=true >/dev/null 2>&1 || true
+
+  render ro-read ro-served | "${K[@]}" apply -f - >/dev/null
+  wait_rollout
+  wait_single_ready
+  RO_POD_IP=$("${K[@]}" -n "$NAMESPACE" get pods -l "app=$APP" \
+    -o jsonpath='{range .items[?(@.status.phase=="Running")]}{.status.podIP}{"\n"}{end}' | head -n 1)
+  if [[ -n "$MACLET_TEST_REMOTE" && -n "$RO_POD_IP" ]]; then
+    RO_OUTPUT=$(ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=2 "$MACLET_TEST_REMOTE" \
+      "curl --fail --location --silent --show-error --max-time 10 http://${RO_POD_IP}:${TEST_PORT}/index.html")
+    if ! grep -F "maclet lifecycle volume $RUN_ID" <<<"$RO_OUTPUT" >/dev/null; then
+      echo "a read-only mounted document root did not serve its content" >&2
+      exit 1
+    fi
+  fi
+  "${K[@]}" -n "$NAMESPACE" delete deployment "$APP" --wait=true >/dev/null 2>&1 || true
+fi
 
 # Exercise the same discovery view used while diagnosing the original issue.
 "${K[@]}" -n "$NAMESPACE" get -o wide pod,service

@@ -288,8 +288,11 @@ semantics on the symlink mapping; lifecycle ownership is journaled so restart
 cleanup only unmounts paths maclet owns. The materialized files are writable
 copies unless the runtime advertises read-only volumes: maclet probes the
 installed Macker for the `HOST:CONTAINER[:ro]` usage marker and only then asks
-for a read-only mapping, refusing a `readOnly` hostPath mount it cannot enforce
-rather than running it writable. `KUBERNETES-PARITY.md` states the node's
+for a read-only mapping, which Macker enforces as a node-wide read-only nullfs
+mount for the volume's lifetime (privileged, like PF and NFS). A `readOnly`
+mount whose resolved host path is a single file is refused at reconciliation,
+because macOS cannot nullfs a single file, as is a `readOnly` request against a
+Macker that does not advertise `:ro` — maclet never runs such a mount writable. `KUBERNETES-PARITY.md` states the node's
 contract for every core Pod field, including the deviations that fail closed and
 the ones that are simply absent on a trusted-native node. Every reconciliation pass:
 
