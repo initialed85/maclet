@@ -72,16 +72,32 @@ Read-only state that maclet enforces outside Macker:
   so a `readOnly` PVC is read-only at the host mount regardless of Macker.
 - `configMap` volumes are materialized into a per-Pod directory owned by maclet.
   Writes by the workload stay in that copy and never reach the Kubernetes
-  ConfigMap; once `:ro` is available maclet asks for it on that directory too.
+  ConfigMap; maclet also asks for `:ro` on that directory when the runtime
+  advertises it.
 
-Two properties of the enforcement are worth stating plainly, because they are not
-what a Linux reader assumes:
+Three properties of the enforcement are worth stating plainly, because they are
+not what a Linux reader assumes:
 
-- Read-only volumes need root or passwordless `sudo` on the node, the same
-  privilege maclet already needs for PF mappings and NFS mounts.
-- The nullfs mount is **node-wide for the mount's lifetime**, not per-process
-  sandboxing. It is the right primitive for a `readOnly` volume; it is not
-  isolation, and rule 4 below still holds.
+- Read-only volumes need root or passwordless `sudo` **at mount time**, and
+  `mount_nullfs` has to be resolvable from the environment Macker is launched
+  with. maclet execs Macker directly as its own user, inheriting maclet's
+  environment, and only wraps the commands *it* runs (`ifconfig`, `route`,
+  `arp`, `mount_nfs`, PF) in `sudo -n`. Measured on `icarus-2.local`:
+  `error: mount_nullfs was not found; it ships with macOS` — the helper lives in
+  `/sbin`, so a Macker that looks it up by name fails before privilege is ever
+  consulted. The Pod stayed `Pending`; it was never run writable.
+- The nullfs mount is per mount point inside that container's rootfs and
+  **node-wide for the mount's lifetime**. It is not per-process.
+- It is **not a sandbox, and not containment**. The workload is an ordinary
+  Darwin process, launched without `chroot`, so it can open the same host path
+  directly with its own host permissions and never touch the read-only mount at
+  all. `readOnly` on a maclet node means *writes through that mount fail with
+  `EROFS`* — kernel-enforced, and enough to stop a workload writing where it
+  should not. It does **not** mean the workload cannot read that tree, cannot
+  reach it another way, or is confined. A policy of "mount sensitive trees
+  read-only" is a guard against incidental writes here, not a security boundary;
+  host access is the boundary, and a darwin-native workload has host access.
+  Rule 4 still holds.
 
 ## Pod and scheduling semantics
 
@@ -202,7 +218,14 @@ no shell in the image:
 A `hostPath` of type `File` (or a `subPath` that resolves to a file) with
 `readOnly: true` never reaches the runtime at all: maclet refuses it during
 reconciliation with "not a directory: macOS mount_nullfs cannot mount a single
-file read-only".
+file read-only". Macker carries the same refusal, so if that message is what
+surfaces instead of maclet's, maclet's admission check missed the shape and the
+fixture should be reported as a maclet bug.
+
+On the node itself, confirm the mount rather than inferring it from the argv:
+`macker inspect --format json` reports `read_only` per volume and
+`mounted_volumes` with the mount point under the container rootfs, so "the Pod
+never became Ready" can be paired with "the mount really exists, read-only".
 
 `test-native-workload-lifecycle.sh` also covers the writable `hostPath` lifecycle
 against a real cluster, including that an invalid volume rollout leaves the Pod

@@ -407,7 +407,10 @@ optional missing ConfigMaps. `readOnly` hostPath mounts are negotiated with the 
 whether the installed Macker advertises `HOST:CONTAINER[:ro]` (a negative answer
 is re-probed after 5 minutes, so a Macker upgrade heals a joined node) and then
 passes `readOnly` through as `:ro`, which Macker enforces with a read-only
-nullfs mount. A `readOnly` mount whose resolved host path is a single file is
+nullfs mount. Read-only means writes through that mount fail with `EROFS`; it is
+not containment, because a darwin-native workload runs without `chroot` and can
+open the same host path directly with its own host permissions. A `readOnly`
+mount whose resolved host path is a single file is
 refused, because macOS cannot nullfs-mount one file read-only; mount the
 containing directory and address the file inside it. Against a Macker that
 cannot enforce `:ro` at all, a
