@@ -336,6 +336,17 @@ var mackerReadOnlyFalsifiedClaims = []struct {
 		fragment: "errno 19 on Darwin is ENOTSUP",
 		instead:  "errno 19 is ENODEV on both Darwin and Linux (Apple's bsd/sys/errno.h comments it \"operation not supported by device\"); ENOTSUP is 45 on Darwin and 95 on Linux",
 	},
+	{
+		// Macker build-40 (2250a51) named bindfs in guidance and got the closure wrong: it
+		// read Apple's bind_vfsops.c, found the same entitlement gate, and published that
+		// bindfs "is gated the same way" as nullfs. macker re-measured the mount(2) answer on
+		// this node at build-41 (7837864) and the truth is stronger: the type name bindfs is
+		// not registered at all here, drawing ENODEV (19) in every mount-data shape exactly
+		// like a made-up name. Reading the source tree cannot tell you which name a shipping
+		// kernel exposes, which is the trap that sentence exists to warn about.
+		fragment: "bindfs is the other bind-mount VFS Apple still ships",
+		instead:  "bindfs is closed at a stronger level than an entitlement refusal: on macOS 26.6.2 the type name bindfs is not registered at all and draws ENODEV (19) in all three mount-data shapes, identically to a made-up name, so there is no bindfs mount entry point on this OS for anyone to be refused by (measured by Macker at 7837864, which corrected 2250a51)",
+	},
 }
 
 // logFalsifiedReadOnlyReason names any claim in the reason about to be published that maclet

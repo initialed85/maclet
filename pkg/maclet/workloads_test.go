@@ -1031,6 +1031,33 @@ func TestFalsifiedReadOnlyClaimWarnsWithoutRewritingTheReason(t *testing.T) {
 	if got := manager.readOnlyProbeRefusal(mackerReadOnlyVerdict{Reason: falseReason}); got != falseReason {
 		t.Errorf("refusal = %q, want Macker's reason passed through verbatim even when maclet knows better", got)
 	}
+
+	// The same check has to hold for the alternate-route claim, and that one is easy to get
+	// wrong in the test: macker build-41's honest guidance discusses bindfs, its entitlement
+	// and EPERM at length, so a loose matcher would flag the corrected text. These two excerpts
+	// are taken from the builds themselves, which is what pins the fragment rather than a guess.
+	logged.Reset()
+	manager.readOnlyFalsifiedLogged = ""
+	bindfsFalseGuidance := "bindfs is the other bind-mount VFS Apple still ships in this " +
+		"generation and it is gated the same way: Apple's source at bsd/miscfs/bindfs/" +
+		"bind_vfsops.c for xnu-12377.121.6 defines BINDFS_ENTITLEMENT " +
+		"com.apple.private.bindfs-allow, bindfs_mount returns EPERM unless the caller holds it"
+	bindfsHonestGuidance := "bindfs is the other bind-mount route an operator reaches for after " +
+		"reading `no nullfs helper exists`, and it is closed at a stronger level than a refusal: " +
+		"on macOS 26.6.2 the type name bindfs is not registered at all and draws ENODEV (19) in " +
+		"all three mount-data shapes, identically to a made-up name; Apple's " +
+		"bsd/miscfs/bindfs/bind_vfsops.c defines BINDFS_ENTITLEMENT " +
+		"com.apple.private.bindfs-allow and a bindfs_mount that returns EPERM without it, and " +
+		"reading that file alone cannot tell you the shipping kernel does not expose the name"
+	manager.logFalsifiedReadOnlyReason(bindfsFalseGuidance)
+	if out := logged.String(); !strings.Contains(out, "bindfs") {
+		t.Errorf("build-40's bindfs claim was not flagged: %q", out)
+	}
+	logged.Reset()
+	manager.logFalsifiedReadOnlyReason(bindfsHonestGuidance)
+	if out := logged.String(); out != "" {
+		t.Errorf("build-41's corrected bindfs guidance was flagged as falsified: %q", out)
+	}
 }
 
 // Two negative answers look the same in a Pod's status and mean opposite things to the

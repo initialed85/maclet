@@ -126,18 +126,24 @@ node yet):
 
 ```console
 mount(2), four arguments (type, path, flags, data)
-  type "nullfs"     -> EPERM (1)      both measured data forms; a vfs entry point refusing
+  type "nullfs"     -> EPERM (1)      both measured data forms, and with the data pointer nil too;
+                                      a vfs entry point refusing, not a spec being misread
   type "null"       -> ENODEV (19)    identical to a made-up name "bogusfsxyz"
+  type "bindfs"     -> ENODEV (19)    all three data shapes; the name is not registered here
   type "devfs"      -> mounts, unmounts        (the control that calibrates the probe)
   type apfs         -> EINVAL with a device spec, EFAULT (14) with "/dev/null"
   type "nfs"        -> EPROGMISMATCH (75)
 ```
 
-`bindfs` is the other name worth asking about, and the probe now includes it; it has **not** been
-measured on a node, so its answer is a prediction from source rather than a reading: xnu
-`xnu-12377.121.6:bsd/miscfs/bindfs/bind_vfsops.c:140` opens `bindfs_mount()` with the identical
-entitlement gate under `com.apple.private.bindfs-allow`, so a node that has bindfs built in
-should answer `EPERM` there too.
+`bindfs` is the other name worth asking about, and the probe includes it. Its answer is now a
+**reading, not a prediction**, and it is the opposite of what the source says: on macOS 26.6.2 the
+type name `bindfs` is **not registered at all** and draws `ENODEV` (19) in all three mount-data
+shapes, identically to a made-up name, so there is no bindfs mount entry point on this OS for
+anybody to be refused by. xnu `xnu-12377.121.6:bsd/miscfs/bindfs/bind_vfsops.c:140` opens
+`bindfs_mount()` with an entitlement gate under `com.apple.private.bindfs-allow` that is
+structurally identical to nullfs's, and that file is exactly why this row had to be measured:
+reading it tells you bindfs is present-and-gated, which is false on the shipping kernel. So
+bindfs is closed at a *stronger* level than nullfs -- nothing reaches the gate to be refused.
 
 Two measurement traps live in that table, and they are how this question got argued in two
 directions on one node. macOS `strerror(19)` reads *"Operation not supported by device"*, so
@@ -200,9 +206,11 @@ worth carrying, because each one is a way to misread a probe:
   `user_data + sizeof(conf)`, so the spec this filesystem wants is a conf followed by a path,
   not a `fstype=…,from=…` string. `MNT_RDONLY` is forced, not requested; and
 - `bindfs` -- `bsd/miscfs/bindfs/`, present in the same tree and also a nullfs derivative --
-  opens its mount with the identical gate under `com.apple.private.bindfs-allow`. So there is
-  no second filesystem to route around: both bind-mount VFSes on this OS are entitlement-gated,
-  and no third-party binary can hold either.
+  opens its mount with the identical gate under `com.apple.private.bindfs-allow` **in the source
+  tree**, but the shipping kernel on macOS 26.6.2 does not expose the name at all (`ENODEV`, above).
+  So there is no second filesystem to route around either: nullfs is present and gated where root
+  cannot follow, and bindfs is not registered so there is nothing to be refused by. The asymmetry is
+  the lesson -- a source reading named both as gated, and measurement separated them.
 
 That errno naming needs pinning too, because an intermediate Macker build published the wrong
 version of it and maclet carries a runtime `reason` verbatim. Apple's own
@@ -249,10 +257,23 @@ registered and answers `EPERM` at an entitlement gate. So the stage also fails o
 maclet has falsified, verified against the two builds' own text rather than against a guess:
 `dee408c`'s reason trips the negative assertion and `866c98f`'s does not. That makes a red stage
 on an unrolled node the expected result, and it is what turns "stage green" into evidence about
-truth instead of only about shape. maclet's own runtime path mirrors the concern without editing
+truth instead of only about shape. The same table also catches a claim maclet itself repeated: the
+paragraph above used to state, from a source reading, that bindfs "is gated the same way", and
+macker build-40 (`2250a51`) published that into its `guidance` -- which maclet copies to the node
+log -- before re-measuring on the node at build-41 (`7837864`) and finding the name is not
+registered at all. So `logFalsifiedReadOnlyReason` flags both the nullfs-registration falsehood and
+the bindfs closure, and the fragment is pinned against the two builds' real text rather than a
+paraphrase: `2250a51` trips it, `7837864` does not, even though the corrected paragraph still
+discusses `bindfs-allow` and `EPERM` at length. maclet's own runtime path mirrors the concern without editing
 any Pod: `logFalsifiedReadOnlyReason` says on the node log that a published claim is false and
 what replaced it, and the refusal text itself stays verbatim, because silently rewriting a
 runtime's explanation would make a Pod's status uncheckable against the binary that produced it.
+The roll target this leaves is macker **build-41 (`7837864`)**, not build-35 (`7468fd2`): measured
+against this very matcher and this very stage regex, `7468fd2` publishes "errno 19 on Darwin is
+ENOTSUP" and so trips both, while `866c98f` (build-38) and `7837864` (build-41) are clean on both.
+Build-38 to build-41 is a one-line change inside `guidance` and no change at all to the `reason`
+maclet copies into a Pod's status, so the choice between them is only about what the node log tells
+an operator.
 On a node whose macOS does provide a usable read-only bind mount, the same stage
 exercises the enforcement path unchanged: the Pod runs, its writes fail, and it never
 becomes Ready.

@@ -410,7 +410,10 @@ if [[ "$MACLET_TEST_READ_ONLY" == "true" ]]; then
     # contradicts. Fail on the known-false claims instead, which makes this stage evidence
     # about truth rather than only about shape. It is expected to fail on a node running
     # macker before ff7b159 and to pass on build-38 (866c98f) onward: that is the defect, not
-    # a flake, and the refusal it grades is itself correct in both cases.
+    # a flake, and the refusal it grades is itself correct in both cases. It also catches
+    # macker build-40's bindfs closure ("gated the same way"), which build-41 replaced with the
+    # measured answer -- the type name bindfs is not registered here at all -- so the target for
+    # a green run is build-41 (7837864) onward.
     if grep -qiE 'does not register|registers no|nullfs (is |was )?removed|removed nullfs|no nullfs (vfs|filesystem)( |,|$)|errno 19 on Darwin is ENOTSUP' <<<"$RO_REFUSAL_MESSAGE"; then
       echo "refusal reason asserts a mechanism maclet has falsified, so this node is publishing an untrue cause to Pods (upgrade macker to ff7b159 or later): $RO_REFUSAL_MESSAGE" >&2
       exit 1

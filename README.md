@@ -431,10 +431,15 @@ the filesystem *is* registered, under the type name `nullfs` (the Linux name
 `null` is what answers `ENODEV`, exactly as a made-up name does), and `mount(2)`
 for `nullfs` returns `EPERM` even as root -- xnu's `nullfs_mount()` refuses any
 task without the private entitlement `com.apple.private.nullfs_allow`, with no
-superuser fallback, and `bindfs` is gated the same way under
-`com.apple.private.bindfs-allow`, so there is no second filesystem to route
-around it. No Macker build, at any uid, can enforce a read-only hostPath mount
-there. maclet refuses such a Pod at admission instead of launching it into a
+superuser fallback. `bindfs`, the other bind-mount filesystem an operator reaches
+for after being told there is no nullfs helper, is closed harder still: on macOS
+26.6.2 the type name `bindfs` is not registered at all and answers `ENODEV` (19)
+in every mount-data shape, identically to a made-up name, so there is no bindfs
+mount entry point on this OS for anyone to be refused by -- and the trap is that
+Apple's `bsd/miscfs/bindfs/bind_vfsops.c` does define `com.apple.private.bindfs-allow`
+and an entitlement-gated `bindfs_mount()`, so reading that file tells you the
+opposite of what the shipping kernel exposes. No Macker build, at any uid, can
+enforce a read-only hostPath mount there. maclet refuses such a Pod at admission instead of launching it into a
 mount failure. Where nullfs does exist, Macker enforces a node-wide
 read-only nullfs mount, and read-only means writes through that mount fail with
 `EROFS`; it is not containment, because a darwin-native workload runs without
