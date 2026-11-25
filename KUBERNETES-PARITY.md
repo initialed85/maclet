@@ -98,25 +98,22 @@ arguments `(type, path, flags, data)`, calibrated because as root `devfs` genuin
 mounted while `apfs`/`hfs` returned `EINVAL` — where fstype `null` returned **`ENODEV`
 (19)**, byte-identical to a `bogusfsxyz` control.
 
-That measurement was the basis for a stronger sentence than it supports -- "the nullfs VFS
-is not registered in the
-macOS 26.6.2 release kernel". The kernel-side claim belongs to macker, in macker's lane,
-and it is narrower than it first reads. macker's reading of `xnu-12377.121.6` (the generation matching
-Darwin 25) is that `bsd/miscfs/nullfs/` **is** still built into the kernel, but
-`nullfs_mount()` opens with
+That measurement was the basis for a stronger sentence than it needed -- "the nullfs VFS is
+not registered in the macOS 26.6.2 release kernel" -- because it was only half of what is
+true. macker resolved the two readings in its own lane, and the resolution fits both:
+`bsd/miscfs/nullfs/` is still in Apple's source for `xnu-12377.121.6` (the generation
+matching Darwin 25), where `nullfs_mount()` opens with
 `if (!IOCurrentTaskHasEntitlement("com.apple.private.nullfs_allow")) return EPERM;` **with
-no superuser fallback**, and forces `MNT_RDONLY` on every mount. So the kernel has the
-filesystem and still cannot be reached: no helper path, no `MACKER_MOUNT_NULLFS` override,
-and no amount of `sudo` makes this mount on that OS -- which is the practical conclusion
-maclet's probe turns into an admission refusal instead of a doomed launch.
-
-One discrepancy stays open, and it is macker's to settle: an entitlement refusal is
-`EPERM`, and what this node returns is `ENODEV`, which reads as "no such filesystem type
-registered". Either this build registers nullfs under a type name other than `null`, or
-the code is not reachable here. It does not change maclet's behaviour -- both readings
-refuse the same Pods -- but macker's own refusal text is copied verbatim into
-`.status.message` on every refused workload, and it currently asserts the kernel-side
-conclusion, so operators are being shown a claim the measurement does not support.
+no superuser fallback** and forces `MNT_RDONLY` on every mount -- but the **built** kernel on
+macOS 26.6.2 arm64 registers no nullfs VFS, which is why this node answers `ENODEV` where an
+entitlement refusal would say `EPERM`. The filesystem is in the source and unreachable on
+this OS by either door: no helper path, no `MACKER_MOUNT_NULLFS` override, and no amount of
+`sudo` or entitlement makes this mount here -- the practical conclusion maclet's probe turns
+into an admission refusal instead of a doomed launch. macker's `--probe` states both halves
+on this node today: `probe_status: not_attempted_os`, a `reason` naming the missing bundle
+and the unregistered VFS, and a `guidance` field carrying the entitlement finding, which
+maclet logs on the node and deliberately keeps out of Pod status so a Pod does not carry a
+second diagnosis of the same problem.
 
 The failure is not privilege either: the same node grants `(ALL) NOPASSWD: ALL` to the
 user maclet runs as (uid 501), `sudo -n -v` succeeds, and the `mount` above ran as root and
