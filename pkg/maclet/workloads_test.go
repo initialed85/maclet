@@ -418,6 +418,19 @@ func TestVolumeArgRefusalsAreClassifiedAsManifestConfig(t *testing.T) {
 	}
 }
 
+// nullfsAvailablePlatformProbe answers the operating-system half of the read-only
+// question the way a node with a usable nullfs does. A test that is about what *Macker*
+// advertises must not inherit the answer from whatever machine runs the suite: maclet's
+// own probe reports no nullfs helper, no null.fs bundle and no vfs.generic.nullfs on a
+// macOS 26 runner, and three tests that expected an advertising Macker to be honoured
+// went red for a reason that had nothing to do with the code under them. Tests that
+// deliberately exercise the OS branch (see
+// TestReadOnlyVolumeCapabilityRefusesAdvertisedButUnenforceableNodes) already state it
+// explicitly; these now do the same, so the suite gives the same result on every runner.
+func nullfsAvailablePlatformProbe() *readOnlyPlatformProbe {
+	return &readOnlyPlatformProbe{exists: func(string) bool { return true }, kernelFeature: func(string) bool { return false }}
+}
+
 func TestMackerReadOnlyVolumeCapabilityProbe(t *testing.T) {
 	help := "  -v value\n    \thost path and container path, HOST:CONTAINER[:ro] (repeatable)\n"
 	if !mackerHelpAdvertisesReadOnlyVolumes(help) {
@@ -435,10 +448,13 @@ func TestMackerReadOnlyVolumeCapabilityProbe(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if manager := newWorkloadManager(nil, supported, ""); !manager.supportsReadOnlyVolumes() {
+	advertising := newWorkloadManager(nil, supported, "")
+	advertising.readOnlyPlatform = nullfsAvailablePlatformProbe()
+	if !advertising.supportsReadOnlyVolumes() {
 		t.Fatal("supportsReadOnlyVolumes() = false for a Macker that advertises [:ro]")
 	}
 	manager := newWorkloadManager(nil, unsupported, "")
+	manager.readOnlyPlatform = nullfsAvailablePlatformProbe()
 	if manager.supportsReadOnlyVolumes() {
 		t.Fatal("supportsReadOnlyVolumes() = true for a Macker that does not advertise [:ro]")
 	}
@@ -571,8 +587,9 @@ func TestNoteReadOnlyVolumeNodeRejection(t *testing.T) {
 		t.Fatal(err)
 	}
 	manager := newWorkloadManager(nil, supported, "")
+	manager.readOnlyPlatform = nullfsAvailablePlatformProbe()
 	if !manager.supportsReadOnlyVolumes() {
-		t.Fatal("baseline: advertised read-only support should be accepted off-Darwin")
+		t.Fatal("baseline: advertised read-only support should be accepted when the OS can mount it")
 	}
 	// An unrelated launch failure is not a capability answer.
 	manager.noteReadOnlyVolumeNodeRejection("error: configure container rootfs: token ____MACKER_PORT_1____ has no runtime value")

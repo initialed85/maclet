@@ -77,6 +77,9 @@ func TestMackerConfigMapVolumeKeepsReadOnlyWhenMackerSupportsIt(t *testing.T) {
 	}
 	manager := newWorkloadManagerWithState(nil, binary, "192.0.2.10", t.TempDir())
 	manager.apiClient = client
+	// The Macker in this test advertises [:ro]; whether the mount is forwarded is the
+	// question, so the OS answer is stated rather than inherited from the runner.
+	manager.readOnlyPlatform = nullfsAvailablePlatformProbe()
 	pod := Pod{ObjectMeta: ObjectMeta{Namespace: "demo", Name: "native", UID: "uid-1"}, Spec: PodSpec{Volumes: []Volume{{Name: "settings", VolumeSource: VolumeSource{ConfigMap: &ConfigMapVolumeSource{LocalObjectReference: LocalObjectReference{Name: "settings"}}}}}}}
 	container := ContainerSpec{VolumeMounts: []VolumeMount{{Name: "settings", MountPath: "/etc/app", ReadOnly: true}}}
 	args, err := manager.mackerVolumeArgsWithContext(context.Background(), pod, container, nil)
