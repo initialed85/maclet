@@ -369,22 +369,39 @@ if [[ "$MACLET_TEST_READ_ONLY" == "true" ]]; then
   render ro-read ro-served | "${K[@]}" apply -f - >/dev/null
   # Two legitimate outcomes, and the difference between them is the node's OS.
   # Where nullfs exists the mount is enforced and the Pod serves its content
-  # read-only. Where it does not (macOS 26 ships no nullfs at all) maclet refuses
-  # the Pod at admission rather than run that mount writable. Either way maclet
+  # read-only. Where it cannot (macOS 26 gates nullfs behind a private entitlement with no
+  # superuser fallback, and on this build mount(2) reports ENODEV for the type) maclet
+  # refuses the Pod at admission rather than run that mount writable. Either way maclet
   # must never start a :ro mount it cannot enforce.
   RO_REFUSED=false
+  RO_REFUSAL_MESSAGE=""
   for _ in $(seq 1 60); do
     if "${K[@]}" -n "$NAMESPACE" get deployment "$APP" -o jsonpath='{.status.readyReplicas}' 2>/dev/null | grep -qE '^[1-9]$'; then
       break
     fi
     if "${K[@]}" -n "$NAMESPACE" get pods -o jsonpath='{.items[*].status.reason}' 2>/dev/null | grep -q MacletUnsupportedPod; then
       RO_REFUSED=true
+      RO_REFUSAL_MESSAGE=$("${K[@]}" -n "$NAMESPACE" get pods -o jsonpath='{range .items[*]}{.status.message}{"\n"}{end}' 2>/dev/null | grep -i readOnly | head -n 1)
       break
     fi
     sleep 2
   done
   if [[ "$RO_REFUSED" == "true" ]]; then
-    echo "node cannot enforce read-only hostPath mounts (no nullfs): :ro Pods refused at admission, as designed"
+    # Two outcomes can produce this Pending Pod, and they are not the same thing: the
+    # runtime declined because a read-only view cannot be held here, or the mount happened
+    # and stayed writable. On this node both look identical as a refusal unless the reason
+    # text is read -- macker asked for exactly that distinction, and maclet copies the
+    # runtime's own reason into .status.message, so it is available here.
+    if grep -qiE 'writ(e|ing|es).*succe|stayed writable|mounted .* writable|remained writable' <<<"$RO_REFUSAL_MESSAGE"; then
+      echo "macker FAILED to enforce read-only (a mount accepted writes) rather than refusing it: $RO_REFUSAL_MESSAGE" >&2
+      exit 1
+    fi
+    if ! grep -qiE 'no null|not register|not attempted|refus|entitlement|helper|nullfs' <<<"$RO_REFUSAL_MESSAGE"; then
+      echo "refusal reason names no mechanism, so an honest refusal is indistinguishable from a bug here: $RO_REFUSAL_MESSAGE" >&2
+      exit 1
+    fi
+    echo "node cannot enforce read-only hostPath mounts: :ro Pods refused at admission, as designed"
+    echo "  refusal reason: $(tr -d '\n' <<<"$RO_REFUSAL_MESSAGE" | cut -c1-170)"
   else
     wait_rollout
     wait_single_ready

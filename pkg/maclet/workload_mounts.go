@@ -228,13 +228,18 @@ func mackerReportsReadOnlyMountFailure(detail string) bool {
 // read-only bind mount at all, independently of which Macker is installed. It
 // exists because Macker advertises `HOST:CONTAINER[:ro]` from its argument
 // grammar, which describes what the binary is able to ask for rather than what
-// this kernel is able to do. Measured on the icarus node (macOS 26.6.2,
-// arm64): no /sbin/mount_nullfs, no mount_null helper in /sbin at all, no
-// null.fs bundle for mount(8) to exec (`mount -t null` fails with error 72),
-// and no vfs.generic.nullfs sysctl -- so nullfs is absent from the platform, and
-// no Macker build can enforce a read-only hostPath mount there. The probe checks
-// presence rather than mounting, because a real mount would need root and would
-// make unit tests depend on the machine running them.
+// this kernel is able to do. Measured on the icarus node (macOS 26.6.2, arm64):
+// no /sbin/mount_nullfs, no mount_null helper in /sbin at all, no null.fs bundle for
+// mount(8) to exec (`mount -t null` fails with error 72), and no vfs.generic.nullfs
+// sysctl entry; a calibrated mount(2) with fstype "null" returns ENODEV. macker reads
+// xnu-12377.121.6 as still containing bsd/miscfs/nullfs with nullfs_mount() gated on the
+// private entitlement com.apple.private.nullfs_allow and no superuser fallback, which is
+// why no helper, vendored or otherwise, can mount here -- whether the type is also
+// unregistered on this build (which ENODEV would suggest) is open in macker's lane. Both
+// readings end the same place: no Macker build can enforce a read-only hostPath mount on
+// this OS, so maclet refuses it at admission. The probe checks presence rather than
+// mounting, because a real mount would need root and would make unit tests depend on the
+// machine running them.
 type readOnlyPlatformProbe struct {
 	// exists reports whether a path is present. Helpers, filesystem bundles.
 	exists func(path string) bool

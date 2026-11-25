@@ -239,7 +239,7 @@ func (m *workloadManager) readOnlyVolumeCapability() (bool, bool, string) {
 		// A Macker that advertises `:ro` on a macOS without nullfs still accepts the
 		// flag and still fails the mount, so the platform has to be checked before
 		// promising a Pod its volume will be read-only.
-		return false, false, "this operating system provides no read-only bind mount mechanism: no mount helper, no null filesystem bundle, and no nullfs kernel feature (macOS 26 removed nullfs)"
+		return false, false, "this operating system provides no usable read-only bind mount for a hostPath: no mount helper, no null filesystem bundle, and no vfs.generic.nullfs sysctl entry. macOS gates nullfs behind the private entitlement com.apple.private.nullfs_allow with no superuser fallback, so neither root nor a vendored helper can create the read-only view a readOnly volume asks for."
 	}
 	return supported, false, ""
 }

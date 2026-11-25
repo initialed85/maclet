@@ -79,7 +79,7 @@ that capability in two stages:
 
 The OS check exists because **the marker describes Macker's argument grammar, not
 the kernel underneath it**. Measured on the icarus node (macOS 26.6.2, Darwin
-25.6.0, arm64), nullfs is simply absent from the platform:
+25.6.0, arm64), the userland a read-only bind mount needs is absent:
 
 ```console
 absent  /sbin/mount_nullfs      absent  /Library/Filesystems/null.fs
@@ -92,19 +92,47 @@ mount: /private/tmp/mdst failed with 72
 ```
 
 So on that node **no Macker build can enforce a read-only `hostPath` mount**: the
-helper is not missing from `$PATH`, the filesystem is missing from the OS. And it is
-missing from the kernel too, measured below this document's level: home-ops ran a
-proven-convention `mount(2)` probe on the same box — syscall 167, four arguments
-`(type, path, flags, data)`, calibrated because as root `devfs` genuinely mounted
-while `apfs`/`hfs` returned `EINVAL` — and fstype `null` returned **`ENODEV` (19),
-byte-identical to a `bogusfsxyz` control**. The nullfs VFS is not registered in the
-macOS 26.6.2 release kernel; Apple keeps `bsd/miscfs/nullfs/` in the source tree and
-builds it out, so there is no helper path, no `MACKER_MOUNT_NULLFS` override, and no
-entitlement that makes this mount on that OS. maclet's probe turns that into an
-admission refusal instead of a doomed launch. The failure is not privilege either:
-the same node grants `(ALL) NOPASSWD: ALL` to the user maclet runs as (uid 501),
-`sudo -n -v` succeeds, and the `mount` above ran as root and returned mount's own
-error 72, not a `sudo` complaint.
+helper is not missing from `$PATH`, the filesystem is missing from the OS, and
+home-ops ran a proven-convention `mount(2)` probe on the same box — syscall 167, four
+arguments `(type, path, flags, data)`, calibrated because as root `devfs` genuinely
+mounted while `apfs`/`hfs` returned `EINVAL` — where fstype `null` returned **`ENODEV`
+(19)**, byte-identical to a `bogusfsxyz` control.
+
+That measurement was the basis for a stronger sentence than it supports -- "the nullfs VFS
+is not registered in the
+macOS 26.6.2 release kernel". The kernel-side claim belongs to macker, in macker's lane,
+and it is narrower than it first reads. macker's reading of `xnu-12377.121.6` (the generation matching
+Darwin 25) is that `bsd/miscfs/nullfs/` **is** still built into the kernel, but
+`nullfs_mount()` opens with
+`if (!IOCurrentTaskHasEntitlement("com.apple.private.nullfs_allow")) return EPERM;` **with
+no superuser fallback**, and forces `MNT_RDONLY` on every mount. So the kernel has the
+filesystem and still cannot be reached: no helper path, no `MACKER_MOUNT_NULLFS` override,
+and no amount of `sudo` makes this mount on that OS -- which is the practical conclusion
+maclet's probe turns into an admission refusal instead of a doomed launch.
+
+One discrepancy stays open, and it is macker's to settle: an entitlement refusal is
+`EPERM`, and what this node returns is `ENODEV`, which reads as "no such filesystem type
+registered". Either this build registers nullfs under a type name other than `null`, or
+the code is not reachable here. It does not change maclet's behaviour -- both readings
+refuse the same Pods -- but macker's own refusal text is copied verbatim into
+`.status.message` on every refused workload, and it currently asserts the kernel-side
+conclusion, so operators are being shown a claim the measurement does not support.
+
+The failure is not privilege either: the same node grants `(ALL) NOPASSWD: ALL` to the
+user maclet runs as (uid 501), `sudo -n -v` succeeds, and the `mount` above ran as root and
+returned mount's own error 72, not a `sudo` complaint.
+
+What `test-native-workload-lifecycle.sh` asserts about read-only on this node is the
+**refusal contract**, not `EROFS`: `EROFS` inside a container is blocked by the OS here, so
+a stage that demanded it would be asserting a capability no darwin node in the fleet has.
+The stage requires the runtime's honest answer first -- it reads `.status.message` on the
+refused Pod and fails if that text describes a mount that *accepted writes*, because "the
+runtime refused honestly" and "the runtime failed to enforce" are the same visible outcome
+at admission and only the reason distinguishes them -- and it fails if no Pod carrying a
+`readOnly` mount reached the node at all, so a manifest that silently did not apply cannot
+pass. On a node whose macOS does provide a usable read-only bind mount, the same stage
+exercises the enforcement path unchanged: the Pod runs, its writes fail, and it never
+becomes Ready.
 
 The one shape read-only cannot cover is a **single file**. macOS
 `mount_nullfs` mounts directory subtrees, not files, so maclet refuses a
