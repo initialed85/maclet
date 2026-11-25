@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"net/http/httptest"
@@ -985,5 +986,122 @@ func TestMackerReadOnlyGuidanceIsLoggedOncePerParagraph(t *testing.T) {
 	}
 	if !strings.Contains(output, "run macker volumes --probe") {
 		t.Errorf("guidance log = %q, want the changed paragraph too", output)
+	}
+}
+
+// Two negative answers look the same in a Pod's status and mean opposite things to the
+// person holding the node: a Macker too old to probe is fixed by upgrading Macker, and a
+// Macker that probed and was refused by the kernel is not. maclet logs which evidence
+// answered, and names the probe_status value, so a node log can tell them apart.
+func TestReadOnlyCapabilityLogNamesTheEvidenceThatAnswered(t *testing.T) {
+	root := t.TempDir()
+	for _, tc := range []struct {
+		name     string
+		probe    string
+		plain    string
+		probeRc  int
+		wantLog  string
+		wantMiss string
+	}{
+		{
+			name:    "a probe that answered names its status",
+			probe:   `{"read_only_supported":false,"mechanism":"none","probed":true,"probe_status":"not_attempted_os","reason":"no null filesystem bundle"}`,
+			probeRc: 0,
+			plain:   `{"read_only_supported":true,"mechanism":"mount_nullfs","reason":"enforced elsewhere"}`,
+			// The probe answered, so the unproven `volumes` verdict must not be what the
+			// log claims decided this node.
+			wantLog:  `answered by its probe (probe_status "not_attempted_os")`,
+			wantMiss: "unproven",
+		},
+		{
+			name:     "a build with no probe says so",
+			probe:    "    volumes [--probe] [--format json] ... unknown flag: --probe\n",
+			probeRc:  2,
+			plain:    `{"read_only_supported":false,"mechanism":"none","reason":"no mount path on this node"}`,
+			wantLog:  "answered by its unproven `volumes` verdict",
+			wantMiss: "probe_status",
+		},
+		{
+			// Macker also reports the same status inside the `probe` record, next to the
+			// mount facts, so a verdict carried only there still has to drive the gate.
+			name:     "a status carried only inside the probe record still decides",
+			probe:    `{"read_only_supported":true,"mechanism":"seatbelt","probed":true,"probe":{"status":"policy_enforced_per_process","unmount_error":""},"reason":"a per-process sandbox"}`,
+			probeRc:  0,
+			plain:    `{"read_only_supported":true,"mechanism":"seatbelt","reason":"policy is on"}`,
+			wantLog:  `answered by its probe (probe_status "policy_enforced_per_process")`,
+			wantMiss: "policy is on",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := filepath.Join(root, "macker-"+strings.ReplaceAll(tc.name, " ", "-"))
+			script := "#!/bin/sh\n" +
+				"if [ \"$1\" = volumes ] && [ \"$2\" = --probe ]; then cat <<'JSON'\n" + tc.probe + "\nJSON\nexit " + fmt.Sprint(tc.probeRc) + "\nfi\n" +
+				"if [ \"$1\" = volumes ]; then cat <<'JSON'\n" + tc.plain + "\nJSON\nexit 0\nfi\n" +
+				"echo '    \thost path and container path, HOST:CONTAINER[:ro] (repeatable)'\nexit 2\n"
+			if err := os.WriteFile(fake, []byte(script), 0o755); err != nil {
+				t.Fatal(err)
+			}
+
+			var logged bytes.Buffer
+			previous := log.Writer()
+			log.SetOutput(&logged)
+			defer log.SetOutput(previous)
+
+			manager := newWorkloadManager(nil, fake, "")
+			if manager.supportsReadOnlyVolumes() {
+				t.Errorf("capability = true, want false: %s", manager.readOnlyVolumesReason)
+			}
+			output := logged.String()
+			if !strings.Contains(output, tc.wantLog) {
+				t.Errorf("capability log = %q, want it to say %q", output, tc.wantLog)
+			}
+			if tc.wantMiss != "" && strings.Contains(output, tc.wantMiss) {
+				t.Errorf("capability log = %q, should not say %q", output, tc.wantMiss)
+			}
+		})
+	}
+}
+
+// `write_accepted` already refuses :ro, and so does `unmount_failed`. What the status
+// alone does not say is that a probe mount can be sitting on the node right now, held by
+// nothing a Pod can release. maclet is the long-lived process on that node, so a mount the
+// runtime created and could not remove is maclet's problem to report, whatever verdict the
+// probe ended on.
+func TestMackerProbeLeftoverMountIsReportedOnTheNode(t *testing.T) {
+	root := t.TempDir()
+	fake := filepath.Join(root, "macker")
+	script := "#!/bin/sh\n" +
+		"if [ \"$1\" = volumes ] && [ \"$2\" = --probe ]; then cat <<'JSON'\n" +
+		`{"read_only_supported":false,"mechanism":"mount_nullfs","probed":true,"probe_status":"write_accepted","reason":"a temporary read-only mount was created and a write inside it was accepted","guidance":"release it with sudo umount /tmp/x","probe":{"status":"write_accepted","unmount_error":"Resource busy","unmount_attempts":3}}` +
+		"\nJSON\nexit 0\nfi\n" +
+		"echo '    \thost path and container path, HOST:CONTAINER[:ro] (repeatable)'\nexit 2\n"
+	if err := os.WriteFile(fake, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	var logged bytes.Buffer
+	previous := log.Writer()
+	log.SetOutput(&logged)
+	defer log.SetOutput(previous)
+
+	manager := newWorkloadManager(nil, fake, "")
+	if manager.supportsReadOnlyVolumes() {
+		t.Fatal("capability = true, want false for a mount that stayed writable")
+	}
+	output := logged.String()
+	for _, want := range []string{"left a mount on this node", "Resource busy", "attempted 3 times", `probe status "write_accepted"`} {
+		if !strings.Contains(output, want) {
+			t.Errorf("node log = %q, want it to carry %q", output, want)
+		}
+	}
+	// What the Pod is told is Macker's sentence, verbatim, not the enum: a Pod author reads
+	// "a write inside the mount was accepted" and knows their volume is not read-only, while
+	// `write_accepted` means something only to whoever can read a probe table.
+	detail := manager.readOnlyVolumesRefusalDetail()
+	if !strings.Contains(detail, "write inside it was accepted") {
+		t.Errorf("refusal detail = %q, want Macker's own reason for the Pod", detail)
+	}
+	if strings.Contains(detail, "sudo umount") {
+		t.Errorf("refusal detail = %q, must not carry the node-side release instruction", detail)
 	}
 }

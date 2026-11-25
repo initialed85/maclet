@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"os"
 	"os/exec"
@@ -168,6 +169,45 @@ type mackerReadOnlyVerdict struct {
 	// maclet logs it and keeps it out of the Pod's status: the answer a Pod needs is
 	// `reason`, and a 900-character mount calibration essay is not decision-shaped.
 	Guidance string `json:"guidance"`
+	// Probe carries the same verdict with the mount lifecycle beside it. Macker reports
+	// the status in both places -- `probe_status` for a machine that reads one field,
+	// `status` inside `probe` next to the mount facts -- and the lifecycle detail only
+	// exists in the nested record.
+	Probe struct {
+		Status string `json:"status"`
+		// UnmountError is non-empty when the probe created a mount on this node and could
+		// not take it off. It matters on verdicts that already refuse -- `write_accepted`
+		// is a mount that stayed writable *and* may still be sitting on the node -- so it
+		// is read whatever the status says, and it is node health rather than Pod advice.
+		UnmountError    string `json:"unmount_error"`
+		UnmountAttempts int    `json:"unmount_attempts"`
+	} `json:"probe"`
+}
+
+// probeStatus reads Macker's machine-readable verdict from whichever record carries it.
+func (v mackerReadOnlyVerdict) probeStatus() string {
+	if status := strings.TrimSpace(v.ProbeStatus); status != "" {
+		return status
+	}
+	return strings.TrimSpace(v.Probe.Status)
+}
+
+// probeUnmountFailure reports a probe mount that Macker could not release, so maclet can
+// say so on the node even when the verdict was already a refusal.
+func (v mackerReadOnlyVerdict) probeUnmountFailure() (string, int) {
+	return strings.TrimSpace(v.Probe.UnmountError), v.Probe.UnmountAttempts
+}
+
+// logMackerProbeUnmountFailure writes the node-health half of a probe answer: a mount the
+// runtime created and could not remove. Every such status already refuses :ro, so maclet is
+// not changing its decision here -- it is reporting a leftover mount that a later probe, a
+// later Pod, or whoever inspects the node will otherwise have to rediscover.
+func (m *workloadManager) logMackerProbeUnmountFailure(verdict mackerReadOnlyVerdict) {
+	unmountError, attempts := verdict.probeUnmountFailure()
+	if unmountError == "" {
+		return
+	}
+	log.Printf("macker read-only volume probe left a mount on this node: %s (release attempted %d times, probe status %q) -- ask the node owner to release it before the next probe is read as this node's answer", unmountError, attempts, verdict.probeStatus())
 }
 
 // Macker's probe outcomes, from `macker volumes --probe --format json`. The probe is

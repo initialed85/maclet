@@ -70,6 +70,15 @@ that capability in two stages:
   is a node-operator checklist: maclet writes it to the node log once per distinct
   paragraph (a negative capability answer is re-probed every few minutes, and the
   checklist is long), and never puts it in a Pod's status.
+- Two things maclet reports about the probe itself, both on the node log and neither in a
+  Pod's status. `probe.unmount_error` is logged whatever the status says, because
+  `write_accepted` is a verdict that both refuses and can leave the mount sitting on the
+  node, and maclet is the long-lived process there. And each capability answer is logged
+  with the evidence that produced it — a probe status, an unproven `volumes` verdict, the
+  help marker, or maclet's own reading of the OS — because a Macker too old to probe and a
+  Macker refused by the kernel look identical in a Pod's status, and only one of them is
+  fixed by upgrading Macker. Macker reports its status both as a top-level `probe_status`
+  and inside the `probe` record beside the mount facts; maclet reads either.
   Where neither subcommand exists (the answer comes back as usage text), maclet falls
   back to two checks of its own: whether `macker run --help` advertises the marker
   `HOST:CONTAINER[:ro]`, which is a contract/version check only, and whether this OS

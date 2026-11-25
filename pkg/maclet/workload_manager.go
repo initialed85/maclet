@@ -163,7 +163,12 @@ func (m *workloadManager) supportsReadOnlyVolumes() bool {
 	if m.readOnlyVolumes != nil && (*m.readOnlyVolumes || time.Since(m.readOnlyVolumesProbedAt) < mackerReadOnlyVolumeRetry) {
 		return *m.readOnlyVolumes
 	}
-	supported, decidedByRuntime, reason := m.readOnlyVolumeCapability()
+	supported, decidedByRuntime, reason, answeredBy := m.readOnlyVolumeCapability()
+	// The evidence is logged alongside the answer, not just behind --debug, because the two
+	// negative paths look identical from outside and mean different things: a Macker too old
+	// to probe and a Macker that probed and was refused by the kernel both leave Pods Pending
+	// with a read-only refusal, and only one of them is fixed by upgrading Macker.
+	log.Printf("macker read-only volume capability for this node: supported=%t, answered by %s", supported, answeredBy)
 	if m.debug {
 		log.Printf("debug: Macker read-only volume support detected: %t (from runtime probe: %t)", supported, decidedByRuntime)
 	}
@@ -200,21 +205,23 @@ func (m *workloadManager) readOnlyVolumesRefusalDetail() string {
 //  3. The `run --help` marker and then maclet's own look at the platform, for a Macker
 //     too old to answer at all. The marker is argument grammar, not capability, which
 //     is why it sits last.
-func (m *workloadManager) readOnlyVolumeCapability() (bool, bool, string) {
+func (m *workloadManager) readOnlyVolumeCapability() (bool, bool, string, string) {
 	if verdict, ok := parseMackerReadOnlyVerdict(m.mackerHelpOutput("volumes", "--probe", "--format", "json")); ok {
 		m.logMackerReadOnlyGuidance(verdict.Guidance)
-		switch verdict.ProbeStatus {
+		m.logMackerProbeUnmountFailure(verdict)
+		switch verdict.probeStatus() {
 		case mackerProbeEnforced:
 			reason := strings.TrimSpace(verdict.Reason)
 			if reason == "" {
 				reason = fmt.Sprintf("Macker mounted a temporary read-only volume via %q and the kernel refused a write inside it", verdict.Mechanism)
 			}
-			return true, true, reason
+			return true, true, reason, fmt.Sprintf("its probe, which mounted a temporary read-only volume (probe_status %q)", mackerProbeEnforced)
 		case mackerProbePrivilege, mackerProbeNotRequest, "":
 			// No mount was attempted, so the probe holds no verdict. Ask the unproven
 			// question rather than treating an absent answer as a refusal.
 			if plain, plainOK := parseMackerReadOnlyVerdict(m.mackerHelpOutput("volumes", "--format", "json")); plainOK {
-				return m.readOnlyVerdictDecision(plain, "the read-only probe was not attempted on this node")
+				return m.readOnlyVerdictDecision(plain, "the read-only probe was not attempted on this node",
+					fmt.Sprintf("its unproven `volumes` verdict, because its probe reported probe_status %q without attempting a mount", verdict.probeStatus()))
 			}
 		default:
 			// mount_refused, write_accepted, helper_unavailable, not_attempted_os,
@@ -231,44 +238,45 @@ func (m *workloadManager) readOnlyVolumeCapability() (bool, bool, string) {
 			// adopted) dies with the process and so cannot make that promise, which is why
 			// it is container hardening and not `:ro` capability -- it must keep arriving
 			// here, refusing, whatever its `read_only_supported` field says.
-			return false, true, m.readOnlyProbeRefusal(verdict)
+			return false, true, m.readOnlyProbeRefusal(verdict), fmt.Sprintf("its probe (probe_status %q)", verdict.probeStatus())
 		}
 	}
 	if verdict, ok := parseMackerReadOnlyVerdict(m.mackerHelpOutput("volumes", "--format", "json")); ok {
-		return m.readOnlyVerdictDecision(verdict, "")
+		return m.readOnlyVerdictDecision(verdict, "", "its unproven `volumes` verdict, which this Macker build answers but whose probe does not answer here")
 	}
 	if m.readOnlyVolumesNodeRejected {
-		return false, false, "the installed Macker failed a read-only volume mount on this node, so maclet stopped forwarding :ro until the binary changes"
+		return false, false, "the installed Macker failed a read-only volume mount on this node, so maclet stopped forwarding :ro until the binary changes", "a read-only mount this very Macker binary already failed on this node"
 	}
 	supported := mackerHelpAdvertisesReadOnlyVolumes(string(m.mackerHelpOutput("run", "--help")))
 	if !supported {
-		return false, false, fmt.Sprintf("the installed Macker does not accept the %q volume form, so it cannot be asked for a read-only mount; upgrade Macker (the mount lifecycle needs 363dc0c, and the capability probe that would have named the cause here needs 4527b97)", mackerReadOnlyVolumeMarker)
+		return false, false, fmt.Sprintf("the installed Macker does not accept the %q volume form, so it cannot be asked for a read-only mount; upgrade Macker (the mount lifecycle needs 363dc0c, and the capability probe that would have named the cause here needs 4527b97)", mackerReadOnlyVolumeMarker), "its `run --help`, which does not accept the :ro volume form at all"
 	}
 	if !m.readOnlyPlatformSupportsMounts() {
 		// A Macker that advertises `:ro` on a macOS that cannot reach nullfs still accepts
 		// the flag and still fails the mount, so the platform has to be checked before
 		// promising a Pod its volume will be read-only.
-		return false, false, "this operating system provides no usable read-only bind mount for a hostPath: no mount helper and no null filesystem bundle for the userland route. This kernel does build nullfs, and mount(2) for the registered type name answers EPERM even as root, because nullfs_mount() requires the private entitlement com.apple.private.nullfs_allow with no superuser fallback -- so neither root nor a vendored helper can create the read-only view a readOnly volume asks for."
+		return false, false, "this operating system provides no usable read-only bind mount for a hostPath: no mount helper and no null filesystem bundle for the userland route. This kernel does build nullfs, and mount(2) for the registered type name answers EPERM even as root, because nullfs_mount() requires the private entitlement com.apple.private.nullfs_allow with no superuser fallback -- so neither root nor a vendored helper can create the read-only view a readOnly volume asks for.", "maclet's own reading of this operating system, because this Macker build can be asked for a verdict and cannot produce one"
 	}
-	return supported, false, ""
+	return supported, false, "", "its `run --help` marker, which is argument grammar and not a capability answer"
 }
 
 // readOnlyVerdictDecision turns an unproven `macker volumes` answer into maclet's
-// decision. caveat, when set, is appended so an operator reading a Pending Pod knows
-// the answer was never tested against the kernel.
-func (m *workloadManager) readOnlyVerdictDecision(verdict mackerReadOnlyVerdict, caveat string) (bool, bool, string) {
+// decision. caveat, when set, is appended so an operator reading a Pending Pod knows the
+// answer was never tested against the kernel. answeredBy describes how maclet came to know
+// the verdict, which is for the node log and never reaches a Pod.
+func (m *workloadManager) readOnlyVerdictDecision(verdict mackerReadOnlyVerdict, caveat, answeredBy string) (bool, bool, string, string) {
 	m.logMackerReadOnlyGuidance(verdict.Guidance)
 	reason := strings.TrimSpace(verdict.Reason)
 	if verdict.ReadOnlySupported {
 		if reason == "" {
 			reason = fmt.Sprintf("Macker reports it can enforce read-only volumes here via %q", verdict.Mechanism)
 		}
-		return true, true, reason
+		return true, true, reason, answeredBy
 	}
 	if caveat != "" && reason != "" {
 		reason = reason + " (" + caveat + ")"
 	}
-	return false, true, reason
+	return false, true, reason, answeredBy
 }
 
 // logMackerReadOnlyGuidance writes Macker's node-operator checklist to the node log,
