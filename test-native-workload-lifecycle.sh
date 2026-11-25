@@ -16,6 +16,12 @@ MACLET_TEST_REMOTE=${MACLET_TEST_REMOTE:-}
 # opt-in until a node is known to have one. Set it to true to assert that a
 # readOnly mount really denies writes and still serves reads.
 MACLET_TEST_READ_ONLY=${MACLET_TEST_READ_ONLY:-false}
+# A hostPath volume is a live mapping into the node's own filesystem, so the directory
+# this test mounts has to exist on the Darwin node -- not on whichever machine runs the
+# script. Set this to a shell on the node (for example edwardbeech@192.168.137.111) to
+# create, populate, and remove it there. Leaving it unset assumes this script is running
+# on the node itself, which is the only other way the mount can resolve.
+MACLET_TEST_NODE_SSH=${MACLET_TEST_NODE_SSH:-}
 TEST_PORT=${MACLET_TEST_PORT:-8080}
 MAX_UNAVAILABLE=0
 MAX_SURGE=1
@@ -24,7 +30,19 @@ MAX_SURGE=1
 RUN_ID=${MACLET_TEST_RUN_ID:-$(date +%s)-$$}
 NAMESPACE=${MACLET_TEST_NAMESPACE:-maclet-lifecycle-${RUN_ID}}
 APP=maclet-lifecycle
-HOST_DIR=$(mktemp -d "${TMPDIR:-/tmp}/maclet-lifecycle.XXXXXX")
+
+node_sh() {
+  ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=2 "$MACLET_TEST_NODE_SSH" "$@"
+}
+
+if [[ -n "$MACLET_TEST_NODE_SSH" ]]; then
+  # /private/tmp rather than /tmp because a hostPath is resolved on the node's own
+  # filesystem, and /tmp there is a symlink; the resolved path is what maclet validates.
+  HOST_DIR="/private/tmp/maclet-lifecycle.${RUN_ID}"
+  node_sh "mkdir -p '$HOST_DIR/run' && printf 'maclet lifecycle volume %s\n' '$RUN_ID' >'$HOST_DIR/index.html'"
+else
+  HOST_DIR=$(mktemp -d "${TMPDIR:-/tmp}/maclet-lifecycle.XXXXXX")
+fi
 K=(kubectl --context "$KUBECTL_CONTEXT")
 
 cleanup() {
@@ -35,11 +53,17 @@ cleanup() {
     "${K[@]}" get namespace "$NAMESPACE" >/dev/null 2>&1 || break
     sleep 2
   done
-  rm -rf "$HOST_DIR"
+  if [[ -n "$MACLET_TEST_NODE_SSH" ]]; then
+    node_sh "rm -rf '$HOST_DIR'" >/dev/null 2>&1
+  else
+    rm -rf "$HOST_DIR"
+  fi
 }
 trap cleanup EXIT
 
-printf 'maclet lifecycle volume %s\n' "$RUN_ID" >"$HOST_DIR/index.html"
+if [[ -z "$MACLET_TEST_NODE_SSH" ]]; then
+  printf 'maclet lifecycle volume %s\n' "$RUN_ID" >"$HOST_DIR/index.html"
+fi
 
 render() {
   local mode=$1 version=$2 volume_yaml='' mount_yaml=''

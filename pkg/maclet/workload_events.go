@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net/http"
 	"strings"
 	"time"
 
@@ -194,6 +195,15 @@ func (m *workloadManager) recordPodEvent(ctx context.Context, client *APIClient,
 		emit = postPodEvent
 	}
 	if err := emit(ctx, client, event, count == 1); err != nil {
+		if eventWriteRefusedWhileDeleting(err) {
+			// The memory is kept on purpose: this Pod's namespace is going away, so no
+			// retry can land and the API server is already telling the user so. Logging
+			// it once per pass would bury the reconciliation warnings that matter.
+			if m.debug {
+				log.Printf("debug: dropping Event for Pod %s, its namespace is terminating: %v", podKey, err)
+			}
+			return
+		}
 		// Forget the memory so the next pass retries rather than staying quiet about
 		// something the API server never accepted.
 		m.eventMu.Lock()
@@ -205,6 +215,21 @@ func (m *workloadManager) recordPodEvent(ctx context.Context, client *APIClient,
 	if m.debug {
 		log.Printf("debug: recorded Event %s/%s reason=%s for Pod %s", event.ObjectMeta.Namespace, event.ObjectMeta.Name, event.Reason, podKey)
 	}
+}
+
+// eventWriteRefusedWhileDeleting reports whether an Event write failed because the
+// namespace is already being torn down, which is a refusal no retry can change: the
+// API server answers 403 "unable to create new content in namespace <x>" once a
+// namespace is Terminating, and 404 once it is gone.
+func eventWriteRefusedWhileDeleting(err error) bool {
+	var apiErr *HTTPError
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	if apiErr.Code == http.StatusNotFound {
+		return true
+	}
+	return apiErr.Code == http.StatusForbidden && strings.Contains(apiErr.Body, "unable to create new content in namespace")
 }
 
 // buildPodEvent assembles the object maclet files. The namespace, host, and

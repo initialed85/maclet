@@ -270,6 +270,46 @@ func TestRecordPodEventRetriesAfterAFailure(t *testing.T) {
 	}
 }
 
+// TestRecordPodEventStaysQuietWhenTheNamespaceIsGoingAway covers the noise a long
+// teardown produced on a live node: maclet retried an Event into a Terminating
+// namespace every pass, warning about a refusal that no retry can change. The API
+// server is already reporting that condition, so maclet tries once per state and then
+// goes quiet, while an ordinary failure keeps retrying.
+func TestRecordPodEventStaysQuietWhenTheNamespaceIsGoingAway(t *testing.T) {
+	manager, _ := newEventTestManager()
+	pod := eventTestPod()
+	attempts := 0
+	failWith := func(err error) func(context.Context, *APIClient, *Event, bool) error {
+		return func(context.Context, *APIClient, *Event, bool) error {
+			attempts++
+			return err
+		}
+	}
+	terminating := &HTTPError{Code: http.StatusForbidden, Body: `{"message":"events \"maclet.failed.unsupported.demo\" is forbidden: unable to create new content in namespace maclet-lifecycle-1795603267"}`}
+	manager.emitEvent = failWith(terminating)
+	for i := 0; i < 4; i++ {
+		manager.recordPodEvent(context.Background(), &APIClient{}, pod, "Pending", "MacletUnsupportedPod", "refused")
+	}
+	if attempts != 1 {
+		t.Fatalf("tried the Event write %d times against a terminating namespace, want 1", attempts)
+	}
+	// A different state about the same Pod is a different thing to say, so it gets its
+	// own single attempt rather than being swallowed by the suppression above.
+	manager.recordPodEvent(context.Background(), &APIClient{}, pod, "Failed", "MacletMackerLaunchFailed", "macker run failed")
+	if attempts != 2 {
+		t.Fatalf("tried %d times after the state changed, want 2", attempts)
+	}
+	// A transient failure is not suppressed: it retries until it lands.
+	attempts = 0
+	manager.emitEvent = failWith(&HTTPError{Code: http.StatusInternalServerError, Body: "boom"})
+	for i := 0; i < 3; i++ {
+		manager.recordPodEvent(context.Background(), &APIClient{}, pod, "Pending", "MacletVolumeHostPathMissing", "hostPath does not exist")
+	}
+	if attempts != 3 {
+		t.Fatalf("tried %d times against a transient failure, want one per pass", attempts)
+	}
+}
+
 // TestPostPodEventMergesIntoAnExistingObject covers the restart path: a deterministic
 // name means a second maclet process collides with the Event it already filed, and the
 // answer is to merge into that object rather than to fail. It also pins the permission
