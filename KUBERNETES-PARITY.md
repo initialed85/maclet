@@ -466,11 +466,20 @@ maclet's probe finds it and the guarantee becomes real without a maclet change;
 until then the enforced read-only options on this node class are a `readOnly`
 `PersistentVolumeClaim` (host-side `mount_nfs -o ro`) or a Linux node.
 
+**The scope of that refusal is `readOnly`, and nothing wider.** Writable `hostPath` works on every
+darwin node in the fleet today: there is no `mount(2)`, no filesystem and no entitlement anywhere in
+its path, because Macker resolves the volume with a `Symlink` into the container root. So no
+statement of the form "`hostPath` is impossible on macOS 26" is true, and it is worth naming why
+that sentence kept getting produced: the read-only investigation ran `mount(2)` probes, and a reader
+who takes "this node cannot make a read-only mount" and drops "read-only" arrives at exactly the
+false claim. The narrower truth is that the OS field `readOnly` cannot be honoured on this OS while
+the whole volume source behind it is supported.
+
 ## Volume sources
 
 | Source | On a maclet node |
 | --- | --- |
-| `hostPath` (`Directory`, `DirectoryOrCreate`, `File`, `FileOrCreate`) | Supported, writable live symlink; `readOnly` honoured on directories **only where the OS provides nullfs**, refused otherwise (macOS 26 does not) — and refused on single files everywhere |
+| `hostPath` (`Directory`, `DirectoryOrCreate`, `File`, `FileOrCreate`) | Supported, writable **live symlink** (Macker `os.Symlink`s the host path into the container root, so writes land on the host immediately and the container sees host-side edits); `readOnly` honoured on directories **only where a nullfs mount can actually be made**, refused otherwise -- on macOS 26 nullfs *is* registered but `mount(2)` answers `EPERM` behind a private entitlement, so it is refused there and not because the filesystem is absent -- and refused on single files everywhere |
 | `hostPath` with no `type` | Supported when the path already exists |
 | `hostPath` `Socket`, `CharDevice`, `BlockDevice` | Validated as the right object kind, then passed through |
 | `configMap` | Supported (`items`, `defaultMode`, `binaryData`, `optional`), refreshed in place without a restart |
