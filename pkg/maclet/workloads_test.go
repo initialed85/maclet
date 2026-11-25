@@ -451,6 +451,121 @@ func TestMackerReadOnlyVolumeCapabilityProbe(t *testing.T) {
 	}
 }
 
+// TestReadOnlyPlatformProbeRequiresNullfs pins the platform question: a node with
+// no nullfs helper, no null.fs bundle, and no nullfs kernel feature cannot enforce
+// a read-only hostPath mount, which is what the icarus node measures.
+func TestReadOnlyPlatformProbeRequiresNullfs(t *testing.T) {
+	absent := readOnlyPlatformProbe{exists: func(string) bool { return false }, kernelFeature: func(string) bool { return false }}
+	if absent.hasNullfs() {
+		t.Fatal("a node with no nullfs helper, bundle, or kernel feature reported read-only support")
+	}
+	for _, tc := range []struct {
+		name   string
+		probe  readOnlyPlatformProbe
+		expect bool
+	}{
+		{"helper", readOnlyPlatformProbe{exists: func(path string) bool { return path == "/sbin/mount_nullfs" }, kernelFeature: func(string) bool { return false }}, true},
+		{"legacy helper", readOnlyPlatformProbe{exists: func(path string) bool { return path == "/sbin/mount_null" }, kernelFeature: func(string) bool { return false }}, true},
+		{"mount(8) bundle", readOnlyPlatformProbe{exists: func(path string) bool { return path == "/Library/Filesystems/null.fs" }, kernelFeature: func(string) bool { return false }}, true},
+		{"kernel feature", readOnlyPlatformProbe{exists: func(string) bool { return false }, kernelFeature: func(name string) bool { return name == "vfs.generic.nullfs" }}, true},
+	} {
+		if got := tc.probe.hasNullfs(); got != tc.expect {
+			t.Errorf("%s: hasNullfs() = %t, want %t", tc.name, got, tc.expect)
+		}
+	}
+}
+
+// TestReadOnlyVolumeCapabilityRefusesAdvertisedButUnenforceableNodes is the icarus
+// case: Macker's usage text offers [:ro] because its argument grammar accepts it,
+// while the OS has no nullfs. maclet must refuse at admission rather than forward a
+// flag the kernel will reject.
+func TestReadOnlyVolumeCapabilityRefusesAdvertisedButUnenforceableNodes(t *testing.T) {
+	root := t.TempDir()
+	supported := filepath.Join(root, "macker-ro")
+	if err := os.WriteFile(supported, []byte("#!/bin/sh\necho '    \thost path and container path, HOST:CONTAINER[:ro] (repeatable)'\nexit 2\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	manager := newWorkloadManager(nil, supported, "")
+	manager.readOnlyPlatform = &readOnlyPlatformProbe{exists: func(string) bool { return false }, kernelFeature: func(string) bool { return false }}
+	if manager.supportsReadOnlyVolumes() {
+		t.Fatal("maclet promised read-only volumes on a node whose OS cannot mount them")
+	}
+	pod := Pod{ObjectMeta: ObjectMeta{Namespace: "default", Name: "web", UID: "uid-1"}, Spec: PodSpec{Volumes: []Volume{{Name: "data", VolumeSource: VolumeSource{HostPath: &HostPathVolumeSource{Path: t.TempDir()}}}}}}
+	container := ContainerSpec{VolumeMounts: []VolumeMount{{Name: "data", MountPath: "/var/data", ReadOnly: true}}}
+	if _, err := mackerVolumeArgs(pod, container, false); err == nil || !strings.Contains(err.Error(), "cannot enforce a read-only hostPath mount") {
+		t.Fatalf("refusal did not name the enforcement gap: %v", err)
+	}
+	// A node that does have nullfs gets the flag forwarded, so this gate is not a
+	// blanket refusal.
+	manager.readOnlyPlatform = &readOnlyPlatformProbe{exists: func(path string) bool { return path == "/sbin/mount_nullfs" }, kernelFeature: func(string) bool { return false }}
+	manager.readOnlyVolumes = nil
+	if !manager.supportsReadOnlyVolumes() {
+		t.Fatal("maclet refused read-only volumes on a node that has nullfs")
+	}
+	args, err := mackerVolumeArgs(pod, container, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(args) != 2 || !strings.HasSuffix(args[1], "/var/data:ro") {
+		t.Fatalf("volume args = %#v, want a :ro suffix", args)
+	}
+}
+
+// TestNoteReadOnlyVolumeNodeRejection covers the second line of defence: a node that
+// passes the presence probe and still refuses the mount, for example because the
+// service user cannot sudo, must stop being handed doomed workloads.
+func TestNoteReadOnlyVolumeNodeRejection(t *testing.T) {
+	root := t.TempDir()
+	supported := filepath.Join(root, "macker-ro")
+	if err := os.WriteFile(supported, []byte("#!/bin/sh\necho '    \thost path and container path, HOST:CONTAINER[:ro] (repeatable)'\nexit 2\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	manager := newWorkloadManager(nil, supported, "")
+	if !manager.supportsReadOnlyVolumes() {
+		t.Fatal("baseline: advertised read-only support should be accepted off-Darwin")
+	}
+	// An unrelated launch failure is not a capability answer.
+	manager.noteReadOnlyVolumeNodeRejection("error: configure container rootfs: token ____MACKER_PORT_1____ has no runtime value")
+	if !manager.supportsReadOnlyVolumes() {
+		t.Fatal("an unrelated launch failure downgraded read-only capability")
+	}
+	manager.noteReadOnlyVolumeNodeRejection("macker run ... : exit status 1 (error: no mount helper was found: tried /sbin/mount_nullfs, /sbin/mount and LookPath(mount); mount: /private/tmp/x failed with 72)")
+	if manager.supportsReadOnlyVolumes() {
+		t.Fatal("maclet kept promising read-only volumes after the node refused the mount")
+	}
+	// Installing a different Macker is exactly the event that should ask again.
+	if err := os.WriteFile(supported, []byte("#!/bin/sh\necho '    \thost path and container path, HOST:CONTAINER[:ro] (repeatable)'\necho '# the node gained nullfs in this build'\nexit 2\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if !manager.supportsReadOnlyVolumes() {
+		t.Fatal("a Macker roll did not clear the learned node rejection")
+	}
+}
+
+func TestMackerReportsReadOnlyMountFailure(t *testing.T) {
+	for _, detail := range []string{
+		"error: mount_nullfs was not found; it ships with macOS",
+		"error: no mount helper was found: tried /sbin/mount_nullfs, /usr/sbin/mount_nullfs, then /sbin/mount",
+		"mount: exec /Library/Filesystems/null.fs/Contents/Resources/mount_null for /private/tmp/mdst: No such file or directory",
+		"error: mount -t null -o ro /tmp/a /tmp/b: exit status 71",
+		"error: read-only volume mount failed: operation not permitted",
+	} {
+		if !mackerReportsReadOnlyMountFailure(detail) {
+			t.Errorf("read-only mount failure not recognised: %q", detail)
+		}
+	}
+	for _, detail := range []string{
+		"error: configure container rootfs: token ____MACKER_PORT_1____ has no runtime value",
+		"error: run docker.io/library/busybox:latest: image is not present in local storage",
+		"error: mount_nfs failed: host unreachable",
+		"exit status 1",
+	} {
+		if mackerReportsReadOnlyMountFailure(detail) {
+			t.Errorf("not a read-only mount failure, but matched: %q", detail)
+		}
+	}
+}
+
 func TestDesiredPodStatus(t *testing.T) {
 	pod := Pod{ObjectMeta: ObjectMeta{Name: "web", Namespace: "default"}, Spec: PodSpec{Containers: []ContainerSpec{{Name: "web", Image: "example/web:latest"}}}, Status: PodStatus{Phase: "Pending", Conditions: []PodCondition{{Type: "PodScheduled", Status: "False"}}}}
 	status := desiredPodStatus(pod, "192.168.137.111", "Running", "10.42.8.3", "MacletWorkloadRunning", "running", true, 2)

@@ -40,23 +40,47 @@ runtime.
 
 `readOnly: true` on a `hostPath` volume mount is the field this document exists
 because of. It is honoured on a maclet node whenever the installed Macker can
-enforce it, and refused when it cannot — never quietly dropped.
+enforce it **and** the operating system is capable of it, and refused when either
+is missing — never quietly dropped.
 
 Macker's volume primitive is a symlink from the container rootfs to the live host
 path (`installVolume` → `os.Symlink(mount.HostPath, target)`), and a symlink
-carries no write restriction. Read-only is therefore enforced below the symlink:
-a recent Macker maps a `:ro` volume with `mount_nullfs -o ro`, so create,
-modify, and unlink inside the mount fail with `EROFS` for the workload process.
-maclet negotiates that capability:
+carries no write restriction. Read-only is therefore enforced below the symlink,
+by mapping the directory with nullfs (`mount -t null -o ro`, or the
+`mount_nullfs` helper on platforms that ship it), so create, modify, and unlink
+inside the mount fail with `EROFS` for the workload process. maclet negotiates
+that capability in two stages:
 
 - maclet asks the installed Macker whether `macker run --help` advertises the
   marker `HOST:CONTAINER[:ro]`. The answer is cached; a negative answer is
   re-probed after 5 minutes, so upgrading Macker heals an already-joined node
   without restarting maclet.
-- **Advertised:** `readOnly` is passed through as `-v HOST:CONTAINER:ro`.
-- **Not advertised:** the Pod is refused with a message naming the marker, and
-  maclet never sends `:ro` to a binary that would ignore it. An older Macker
-  fails mid-start on a three-field spec, which is worse than a `Pending` Pod.
+- **Advertised, and the OS has nullfs:** `readOnly` is passed through as
+  `-v HOST:CONTAINER:ro`.
+- **Either answer no:** the Pod is refused at admission, and maclet never sends
+  `:ro` to a runtime that would ignore it. An older Macker fails mid-start on a
+  three-field spec, which is worse than a `Pending` Pod.
+
+The OS check exists because **the marker describes Macker's argument grammar, not
+the kernel underneath it**. Measured on the icarus node (macOS 26.6.2, Darwin
+25.6.0, arm64), nullfs is simply absent from the platform:
+
+```console
+absent  /sbin/mount_nullfs      absent  /Library/Filesystems/null.fs
+absent  /sbin/mount_null        absent  /System/Library/Filesystems/null.fs
+absent  /usr/sbin/mount_nullfs  absent  sysctl vfs.generic.nullfs
+$ ls /sbin | grep '^mount'   # mount, mount_apfs, mount_nfs, mount_tmpfs, ... no null
+$ sudo -n /sbin/mount -t null -o ro /tmp/msrc /tmp/mdst
+mount: exec /Library/Filesystems/null.fs/Contents/Resources/mount_null for /private/tmp/mdst: No such file or directory
+mount: /private/tmp/mdst failed with 72
+```
+
+So on that node **no Macker build can enforce a read-only `hostPath` mount**: the
+helper is not missing from `$PATH`, the filesystem is missing from the OS.
+maclet's probe turns that into an admission refusal instead of a doomed launch.
+The failure is not privilege either: the same node grants `(ALL) NOPASSWD: ALL` to
+the user maclet runs as (uid 501), `sudo -n -v` succeeds, and the `mount` above ran
+as root and returned mount's own error 72, not a `sudo` complaint.
 
 The one shape read-only cannot cover is a **single file**. macOS
 `mount_nullfs` mounts directory subtrees, not files, so maclet refuses a
@@ -78,14 +102,13 @@ Read-only state that maclet enforces outside Macker:
 Three properties of the enforcement are worth stating plainly, because they are
 not what a Linux reader assumes:
 
-- Read-only volumes need root or passwordless `sudo` **at mount time**, and
-  `mount_nullfs` has to be resolvable from the environment Macker is launched
-  with. maclet execs Macker directly as its own user, inheriting maclet's
-  environment, and only wraps the commands *it* runs (`ifconfig`, `route`,
-  `arp`, `mount_nfs`, PF) in `sudo -n`. Measured on `icarus-2.local`:
-  `error: mount_nullfs was not found; it ships with macOS` — the helper lives in
-  `/sbin`, so a Macker that looks it up by name fails before privilege is ever
-  consulted. The Pod stayed `Pending`; it was never run writable.
+- Read-only mounts need root or passwordless `sudo` **at mount time**. That is not
+  the constraint on this node class: the node grants `(ALL) NOPASSWD: ALL` to the
+  maclet user, and maclet execs Macker directly as its own user (only the commands
+  *maclet* runs itself — `ifconfig`, `route`, `arp`, `mount_nfs`, PF — go through
+  `sudo -n`). An earlier version of this document blamed the service `PATH` for
+  lacking `/sbin`; that was wrong, Macker resolves the helper by absolute path
+  first. The real gap is the OS missing nullfs, measured above.
 - The nullfs mount is per mount point inside that container's rootfs and
   **node-wide for the mount's lifetime**. It is not per-process.
 - It is **not a sandbox, and not containment**. The workload is an ordinary
@@ -156,26 +179,43 @@ macker run --detach ... -v /tmp/maclet-ro-check-251125:/var/run:ro -p 8080:auto/
 error: mount_nullfs was not found; it ships with macOS
 ```
 
-That is the stance working as intended on a half-upgraded node: maclet forwarded
-`:ro` because the installed Macker advertises the marker, Macker could not
-perform the mount, and the Pod stayed `Pending` — it was never run with the
-sensitive tree writable. The fix is in the runtime, not the manifest.
+That is the stance working as intended on a node that cannot deliver the field:
+maclet forwarded `:ro` because the installed Macker advertises the marker, Macker
+could not perform the mount, and the Pod stayed `Pending` — it was never run with
+the sensitive tree writable.
 
-**Status of the read-only guarantee as of 2026-11-25, stated honestly:** the
-maclet half is verified on real hardware — `readOnly` reaches Macker as
-`-v HOST:CONTAINER:ro` and a non-readOnly mount stays the plain two-field form.
-The kernel-enforcement half (`EROFS` inside the mount) has **never** been
-observed on a maclet node, because the Macker build on `icarus-2.local`
-(`de5a5d3`) predates macker `220aa0f`, which resolves the nullfs helper by
-absolute path. Read "directory `readOnly` is honoured" as *maclet asks for it and
-the runtime refuses to lie*, not as *tested end to end on Darwin*. The inversion
-pair in the next section is the test that closes it.
+**Conclusion as of 2026-11-25, replacing what this section previously claimed:**
+read-only `hostPath` enforcement is **not achievable on macOS 26 / Darwin 25.6
+arm64**, because the OS provides no nullfs — not as a helper, not as a `mount(8)`
+filesystem, not as a kernel feature. It is a platform limit, not a build gap, and
+rolling a newer Macker does not change it. maclet therefore checks the platform as
+well as the marker, and a `readOnly: true` `hostPath` mount on a node without
+nullfs is refused at admission:
+
+```console
+volume mount "/var/data" requests readOnly, but this node cannot enforce a
+read-only hostPath mount: Macker must accept "HOST:CONTAINER[:ro]" and this
+kernel must support read-only bind mounts, and maclet verifies both. ...
+```
+
+which clients see as `Pending` / `CreateContainerConfigError` with
+`.status.reason: MacletUnsupportedPod` — the manifest-versus-node signal — rather
+than a `RunContainerError` that reads like a runtime crash and invites a retry.
+
+What is verified on real hardware: maclet's forwarding (`:ro` reaches Macker as a
+third field while writable mounts keep the two-field form), the refusal path, and
+that no Pod is ever started with a mount it was promised read-only. What is
+**not** verified anywhere, and must not be claimed: `EROFS` inside a read-only
+`hostPath` mount on a Darwin node. If nullfs ever appears in a macOS release,
+maclet's probe finds it and the guarantee becomes real without a maclet change;
+until then the enforced read-only options on this node class are a `readOnly`
+`PersistentVolumeClaim` (host-side `mount_nfs -o ro`) or a Linux node.
 
 ## Volume sources
 
 | Source | On a maclet node |
 | --- | --- |
-| `hostPath` (`Directory`, `DirectoryOrCreate`, `File`, `FileOrCreate`) | Supported, writable live symlink; `readOnly` honoured on directories, refused on single files |
+| `hostPath` (`Directory`, `DirectoryOrCreate`, `File`, `FileOrCreate`) | Supported, writable live symlink; `readOnly` honoured on directories **only where the OS provides nullfs**, refused otherwise (macOS 26 does not) — and refused on single files everywhere |
 | `hostPath` with no `type` | Supported when the path already exists |
 | `hostPath` `Socket`, `CharDevice`, `BlockDevice` | Validated as the right object kind, then passed through |
 | `configMap` | Supported (`items`, `defaultMode`, `binaryData`, `optional`), refreshed in place without a restart |
@@ -271,15 +311,22 @@ nginx writes its PID file into `/var/run`, so this Pod is a write test that need
 no shell in the image:
 
 1. **`ro-write`** (`readOnly: true` at a path the workload must write): on a node
-   whose Macker advertises `HOST:CONTAINER[:ro]` the workload must **not** come up
-   — nginx dies on `EROFS`. If it reaches `Running`, read-only is theatre. On an
-   older Macker it stays `Pending` with a message naming the marker.
+   that can enforce read-only mounts the workload must **not** come up — nginx
+   dies on `EROFS`. On macOS 26, where the OS has no nullfs, this Pod is refused at
+   admission with `MacletUnsupportedPod` / `CreateContainerConfigError`, which is
+   the same honest answer one stage earlier. In neither case may it reach `Running`
+   with a writable mount; if it does, read-only is theatre.
 2. **`ro-read`** (same volume, mounted at the document root
    `/usr/share/nginx/html` with `readOnly: true`): must reach `Running` and serve
-   the host file, proving `readOnly` is not simply "unusable".
+   the host file, proving `readOnly` is not simply "unusable". On a node without
+   nullfs it is refused too, so this one is a probe for enforceable nodes only.
 3. **`ro-off`** (identical to `ro-write` with `readOnly` removed): must reach
    `Running`. The pair with `ro-write` is the inversion that makes the guarantee
-   meaningful — the same process, denied by one field.
+   meaningful — the same process, denied by one field. Give the `hostPath` a
+   disposable world-writable directory, which is what the lifecycle script uses
+   (`mktemp -d` under `$TMPDIR`): mounting the host's real `/var/run` instead makes
+   the workload's PID path root-owned 0755, and then the writable twin fails for a
+   reason that has nothing to do with `readOnly`.
 
 A `hostPath` of type `File` (or a `subPath` that resolves to a file) with
 `readOnly: true` never reaches the runtime at all: maclet refuses it during

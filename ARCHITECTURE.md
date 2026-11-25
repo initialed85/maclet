@@ -286,15 +286,24 @@ sudo-owned helper, and pass the mount (plus contained subPath) through the
 same mapping. NFS mounts are host-visible and Macker cannot enforce read-only
 semantics on the symlink mapping; lifecycle ownership is journaled so restart
 cleanup only unmounts paths maclet owns. The materialized files are writable
-copies unless the runtime advertises read-only volumes: maclet probes the
-installed Macker for the `HOST:CONTAINER[:ro]` usage marker and only then asks
-for a read-only mapping, which Macker enforces as a node-wide read-only nullfs
-mount for the volume's lifetime (privileged, like PF and NFS). Read-only is a
+copies unless the runtime and the OS can both enforce read-only volumes: maclet
+probes the installed Macker for the `HOST:CONTAINER[:ro]` usage marker and then
+checks that the platform provides nullfs (a helper, a `null.fs` mount bundle, or
+the `vfs.generic.nullfs` kernel feature), and only asks for a read-only mapping
+when both answer yes. Macker then enforces a node-wide read-only nullfs mount for
+the volume's lifetime (privileged, like PF and NFS). The second check matters
+because the marker is argument grammar, not a kernel measurement: macOS 26 /
+Darwin 25.6 arm64 ships no nullfs, so there `readOnly` hostPath mounts are refused
+at admission rather than launched into a mount failure, and enforced read-only
+comes from a `readOnly` PersistentVolumeClaim mounted host-side with
+`mount_nfs -o ro`. Read-only is a
 write restriction on that mount point, not containment: the workload is a plain
 process without `chroot` and can reach the host path directly. A `readOnly`
 mount whose resolved host path is a single file is refused at reconciliation,
 because macOS cannot nullfs a single file, as is a `readOnly` request against a
-Macker that does not advertise `:ro` — maclet never runs such a mount writable.
+Macker or node that cannot enforce `:ro` — maclet never runs such a mount writable,
+and it learns from a Macker mount failure to stop forwarding `:ro` until the
+installed Macker binary changes.
 `KUBERNETES-PARITY.md` states the node's contract for every core Pod field,
 including the deviations that fail closed and the ones that are simply absent on
 a trusted-native node. Every reconciliation pass:

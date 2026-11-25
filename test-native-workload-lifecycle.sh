@@ -324,16 +324,36 @@ if [[ "$MACLET_TEST_READ_ONLY" == "true" ]]; then
   "${K[@]}" -n "$NAMESPACE" delete deployment "$APP" --wait=true >/dev/null 2>&1 || true
 
   render ro-read ro-served | "${K[@]}" apply -f - >/dev/null
-  wait_rollout
-  wait_single_ready
-  RO_POD_IP=$("${K[@]}" -n "$NAMESPACE" get pods -l "app=$APP" \
-    -o jsonpath='{range .items[?(@.status.phase=="Running")]}{.status.podIP}{"\n"}{end}' | head -n 1)
-  if [[ -n "$MACLET_TEST_REMOTE" && -n "$RO_POD_IP" ]]; then
-    RO_OUTPUT=$(ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=2 "$MACLET_TEST_REMOTE" \
-      "curl --fail --location --silent --show-error --max-time 10 http://${RO_POD_IP}:${TEST_PORT}/index.html")
-    if ! grep -F "maclet lifecycle volume $RUN_ID" <<<"$RO_OUTPUT" >/dev/null; then
-      echo "a read-only mounted document root did not serve its content" >&2
-      exit 1
+  # Two legitimate outcomes, and the difference between them is the node's OS.
+  # Where nullfs exists the mount is enforced and the Pod serves its content
+  # read-only. Where it does not (macOS 26 ships no nullfs at all) maclet refuses
+  # the Pod at admission rather than run that mount writable. Either way maclet
+  # must never start a :ro mount it cannot enforce.
+  RO_REFUSED=false
+  for _ in $(seq 1 60); do
+    if "${K[@]}" -n "$NAMESPACE" get deployment "$APP" -o jsonpath='{.status.readyReplicas}' 2>/dev/null | grep -qE '^[1-9]$'; then
+      break
+    fi
+    if "${K[@]}" -n "$NAMESPACE" get pods -o jsonpath='{.items[*].status.reason}' 2>/dev/null | grep -q MacletUnsupportedPod; then
+      RO_REFUSED=true
+      break
+    fi
+    sleep 2
+  done
+  if [[ "$RO_REFUSED" == "true" ]]; then
+    echo "node cannot enforce read-only hostPath mounts (no nullfs): :ro Pods refused at admission, as designed"
+  else
+    wait_rollout
+    wait_single_ready
+    RO_POD_IP=$("${K[@]}" -n "$NAMESPACE" get pods -l "app=$APP" \
+      -o jsonpath='{range .items[?(@.status.phase=="Running")]}{.status.podIP}{"\n"}{end}' | head -n 1)
+    if [[ -n "$MACLET_TEST_REMOTE" && -n "$RO_POD_IP" ]]; then
+      RO_OUTPUT=$(ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=2 "$MACLET_TEST_REMOTE" \
+        "curl --fail --location --silent --show-error --max-time 10 http://${RO_POD_IP}:${TEST_PORT}/index.html")
+      if ! grep -F "maclet lifecycle volume $RUN_ID" <<<"$RO_OUTPUT" >/dev/null; then
+        echo "a read-only mounted document root did not serve its content" >&2
+        exit 1
+      fi
     fi
   fi
   "${K[@]}" -n "$NAMESPACE" delete deployment "$APP" --wait=true >/dev/null 2>&1 || true

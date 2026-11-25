@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -148,6 +150,103 @@ func mackerHelpAdvertisesReadOnlyVolumes(help string) bool {
 	return strings.Contains(help, mackerReadOnlyVolumeMarker)
 }
 
+// mackerReportsReadOnlyMountFailure recognises Macker saying it could not perform
+// a read-only volume mount, as opposed to the workload failing for an unrelated
+// reason. These are the node's own words: an older build reports the helper by
+// name, the current build lists the forms it tried, and mount(8) contributes its
+// own rejection text. Anything else is a launch failure we should not read as a
+// capability answer.
+func mackerReportsReadOnlyMountFailure(detail string) bool {
+	lower := strings.ToLower(detail)
+	for _, signal := range []string{
+		"nullfs",
+		"no mount helper was found",
+		"mount -t null",
+		"read-only volume",
+		"mount_null",
+	} {
+		if strings.Contains(lower, signal) {
+			return true
+		}
+	}
+	return false
+}
+
+// readOnlyPlatformProbe answers whether this operating system can make a
+// read-only bind mount at all, independently of which Macker is installed. It
+// exists because Macker advertises `HOST:CONTAINER[:ro]` from its argument
+// grammar, which describes what the binary is able to ask for rather than what
+// this kernel is able to do. Measured on the icarus node (macOS 26.6.2,
+// arm64): no /sbin/mount_nullfs, no mount_null helper in /sbin at all, no
+// null.fs bundle for mount(8) to exec (`mount -t null` fails with error 72),
+// and no vfs.generic.nullfs sysctl -- so nullfs is absent from the platform, and
+// no Macker build can enforce a read-only hostPath mount there. The probe checks
+// presence rather than mounting, because a real mount would need root and would
+// make unit tests depend on the machine running them.
+type readOnlyPlatformProbe struct {
+	// exists reports whether a path is present. Helpers, filesystem bundles.
+	exists func(path string) bool
+	// kernelFeature reports whether the kernel exposes a name (sysctl oid).
+	kernelFeature func(name string) bool
+}
+
+var readOnlyNullfsHelpers = []string{
+	"/sbin/mount_nullfs",
+	"/usr/sbin/mount_nullfs",
+	"/usr/local/sbin/mount_nullfs",
+	"/sbin/mount_null",
+	"/usr/sbin/mount_null",
+}
+
+var readOnlyNullfsBundles = []string{
+	"/Library/Filesystems/null.fs",
+	"/System/Library/Filesystems/null.fs",
+}
+
+var readOnlyNullfsKernelFeatures = []string{
+	"vfs.generic.nullfs",
+}
+
+func (p readOnlyPlatformProbe) hasNullfs() bool {
+	for _, path := range readOnlyNullfsHelpers {
+		if p.exists(path) {
+			return true
+		}
+	}
+	for _, path := range readOnlyNullfsBundles {
+		if p.exists(path) {
+			return true
+		}
+	}
+	for _, name := range readOnlyNullfsKernelFeatures {
+		if p.kernelFeature(name) {
+			return true
+		}
+	}
+	return false
+}
+
+// defaultReadOnlyPlatformProbe checks the running system. maclet is a Darwin node
+// agent, so the same function serves production and, with the fields replaced, the
+// unit tests.
+// defaultReadOnlyPlatformProbe checks the running system. maclet's own node is
+// always Darwin; off Darwin there is nothing to measure, and unit tests should run
+// wherever the developer runs them rather than depend on the machine's kernel.
+func defaultReadOnlyPlatformProbe() readOnlyPlatformProbe {
+	if runtime.GOOS != "darwin" {
+		return readOnlyPlatformProbe{exists: func(string) bool { return true }, kernelFeature: func(string) bool { return true }}
+	}
+	return readOnlyPlatformProbe{
+		exists: func(path string) bool {
+			_, err := os.Stat(path)
+			return err == nil
+		},
+		kernelFeature: func(name string) bool {
+			return exec.Command("sysctl", "-n", name).Run() == nil
+		},
+	}
+}
+
 // manifestRefusal marks an error whose cause is the Pod manifest rather than the
 // node: maclet's parity policy refuses the shape outright. Reconcile reports
 // these as MacletUnsupportedPod, which clients see as CreateContainerConfigError
@@ -209,7 +308,7 @@ func mackerVolumeArgs(pod Pod, container ContainerSpec, readOnlySupported bool) 
 		seenMountPaths[mountPath] = struct{}{}
 		if mount.ReadOnly {
 			if !readOnlySupported {
-				return nil, refuseManifest("volume mount %q requests readOnly, but this Macker binary does not advertise %q, so its hostPath volumes stay writable live symlinks; upgrade Macker or drop readOnly (see KUBERNETES-PARITY.md)", mountPath, mackerReadOnlyVolumeMarker)
+				return nil, refuseManifest("volume mount %q requests readOnly, but this node cannot enforce a read-only hostPath mount: Macker must accept %q and this kernel must support read-only bind mounts, and maclet verifies both. A hostPath volume on a Darwin node is a live host mapping, so running it writable would promise read-only and deliver the opposite; upgrade Macker, mount the data over NFS with readOnly, or drop readOnly (see KUBERNETES-PARITY.md)", mountPath, mackerReadOnlyVolumeMarker)
 			}
 		}
 		if mount.SubPathExpr != "" {

@@ -360,12 +360,14 @@ func (m *workloadManager) reconcile(ctx context.Context, client *APIClient, pods
 			log.Printf("debug: Macker invocation for %s/%s: %s", pod.ObjectMeta.Namespace, pod.ObjectMeta.Name, redactMackerArgs(args))
 		}
 		if err := m.startMackerWorkload(args, pod.Spec.Containers[0].Image); err != nil {
+			m.noteReadOnlyVolumeNodeRejection(err.Error())
 			reconcileErrors = append(reconcileErrors, fmt.Errorf("start Macker workload %s/%s: %w", pod.ObjectMeta.Namespace, pod.ObjectMeta.Name, err))
 			managed.RetryAfter = time.Now().Add(workloadRetryDelay)
 			_ = m.updateStatus(ctx, client, pod, "Pending", ip, "MacletMackerLaunchFailed", err.Error(), false, managed.RestartCount)
 			continue
 		}
 		if err := m.waitForMackerRunning(managed.ContainerName); err != nil {
+			m.noteReadOnlyVolumeNodeRejection(err.Error())
 			if m.debug {
 				log.Printf("debug: Macker startup failed for %s/%s: %v", pod.ObjectMeta.Namespace, pod.ObjectMeta.Name, err)
 			}

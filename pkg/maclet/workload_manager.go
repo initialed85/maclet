@@ -101,7 +101,16 @@ type workloadManager struct {
 	// Pod asking for readOnly does not re-probe on every reconciliation pass.
 	readOnlyVolumes         *bool
 	readOnlyVolumesProbedAt time.Time
-	capabilityMu            sync.Mutex
+	// readOnlyVolumesNodeRejected records that Macker advertised the read-only
+	// volume marker but a launch still failed on the mount itself. It is sticky
+	// until the Macker binary changes, so maclet refuses readOnly volumes at
+	// admission instead of starting a Pod that is certain to fail.
+	readOnlyVolumesNodeRejected bool
+	readOnlyRejectedBinary      string
+	// readOnlyPlatform caches whether this OS can make a read-only bind mount at
+	// all. nil means use the running system; tests replace it.
+	readOnlyPlatform *readOnlyPlatformProbe
+	capabilityMu     sync.Mutex
 }
 
 // mackerReadOnlyVolumeRetry is how long a negative capability answer is trusted.
@@ -119,22 +128,81 @@ func (m *workloadManager) mackerHelpOutput(args ...string) []byte {
 	return output
 }
 
-// supportsReadOnlyVolumes reports whether the Macker binary can enforce a
-// read-only -v mount. The answer is cached; a negative answer is retried after
-// mackerReadOnlyVolumeRetry so upgrading Macker heals an already-joined node.
+// supportsReadOnlyVolumes reports whether a read-only -v mount can actually be
+// enforced here. Two things have to be true: the installed Macker must accept the
+// third `ro` field (its usage marker), and this node's kernel must be able to make
+// a read-only bind mount at all. The answer is cached; a negative answer is retried
+// after mackerReadOnlyVolumeRetry so upgrading Macker or the OS heals an
+// already-joined node.
 func (m *workloadManager) supportsReadOnlyVolumes() bool {
 	m.capabilityMu.Lock()
 	defer m.capabilityMu.Unlock()
+	if m.readOnlyVolumesNodeRejected {
+		if m.mackerBinaryFingerprint() == m.readOnlyRejectedBinary {
+			return false
+		}
+		// A different Macker is installed, so its mount path may work now.
+		m.readOnlyVolumesNodeRejected = false
+		m.readOnlyRejectedBinary = ""
+		m.readOnlyVolumes = nil
+	}
 	if m.readOnlyVolumes != nil && (*m.readOnlyVolumes || time.Since(m.readOnlyVolumesProbedAt) < mackerReadOnlyVolumeRetry) {
 		return *m.readOnlyVolumes
 	}
 	supported := mackerHelpAdvertisesReadOnlyVolumes(string(m.mackerHelpOutput("run", "--help")))
+	if supported && !m.readOnlyPlatformSupportsMounts() {
+		// Macker's marker is argument grammar. On a macOS without nullfs the binary
+		// still accepts `:ro` and the mount still fails, so check the platform before
+		// promising a Pod its volume will be read-only.
+		supported = false
+	}
 	if m.debug {
 		log.Printf("debug: Macker read-only volume support detected: %t", supported)
 	}
 	m.readOnlyVolumes = &supported
 	m.readOnlyVolumesProbedAt = time.Now()
 	return supported
+}
+
+// readOnlyPlatformSupportsMounts reports whether the running OS provides nullfs,
+// the only mechanism that turns a hostPath mapping into a read-only view. The
+// default probe answers unconditionally off Darwin, so an injected probe is honoured
+// wherever the tests run.
+func (m *workloadManager) readOnlyPlatformSupportsMounts() bool {
+	probe := m.readOnlyPlatform
+	if probe == nil {
+		defaultProbe := defaultReadOnlyPlatformProbe()
+		probe = &defaultProbe
+	}
+	return probe.hasNullfs()
+}
+
+// noteReadOnlyVolumeNodeRejection downgrades the cached capability answer when
+// Macker reports that it could not make a read-only mount, so the next Pod with a
+// readOnly volume is refused at admission with maclet's own reason instead of
+// being launched into the same runtime failure.
+func (m *workloadManager) noteReadOnlyVolumeNodeRejection(detail string) {
+	if !mackerReportsReadOnlyMountFailure(detail) {
+		return
+	}
+	m.capabilityMu.Lock()
+	defer m.capabilityMu.Unlock()
+	if m.readOnlyVolumesNodeRejected {
+		return
+	}
+	m.readOnlyVolumesNodeRejected = true
+	m.readOnlyRejectedBinary = m.mackerBinaryFingerprint()
+	log.Printf("maclet: this node cannot enforce read-only volume mounts; refusing readOnly volumes rather than launching workloads that cannot mount them")
+}
+
+// mackerBinaryFingerprint identifies the installed Macker well enough to notice a
+// roll, which is the event that should clear a learned node rejection.
+func (m *workloadManager) mackerBinaryFingerprint() string {
+	info, err := os.Stat(m.mackerBinary)
+	if err != nil {
+		return ""
+	}
+	return fmt.Sprintf("%d:%s", info.Size(), info.ModTime().UTC().Format(time.RFC3339Nano))
 }
 
 func newWorkloadManager(network *DarwinNetworkHandle, mackerBinary, nodeIP string) *workloadManager {

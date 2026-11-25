@@ -411,20 +411,29 @@ file content, use a `Directory` hostPath plus `subPath` and mount the file at
 its full destination (for example, `/usr/share/nginx/html/index.html`), or use
 a `File` hostPath without `subPath`. ConfigMap volumes are materialized into
 per-Pod state directories and support `items`, `defaultMode`, `binaryData`, and
-optional missing ConfigMaps. `readOnly` hostPath mounts are negotiated with the runtime: maclet probes
-whether the installed Macker advertises `HOST:CONTAINER[:ro]` (a negative answer
-is re-probed after 5 minutes, so a Macker upgrade heals a joined node) and then
-passes `readOnly` through as `:ro`, which Macker enforces with a read-only
-nullfs mount. Read-only means writes through that mount fail with `EROFS`; it is
-not containment, because a darwin-native workload runs without `chroot` and can
-open the same host path directly with its own host permissions. A `readOnly`
-mount whose resolved host path is a single file is
+optional missing ConfigMaps. `readOnly` hostPath mounts are negotiated in two
+stages: maclet probes whether the installed Macker advertises
+`HOST:CONTAINER[:ro]` (a negative answer is re-probed after 5 minutes, so a
+Macker upgrade heals a joined node), and then checks that the OS actually
+provides nullfs -- a helper (`/sbin/mount_nullfs`, `/sbin/mount_null`), a
+`null.fs` mount bundle, or the `vfs.generic.nullfs` kernel feature. Both must
+answer yes before `:ro` is passed through, because the marker describes Macker's
+argument grammar, not the kernel underneath it: macOS 26 / Darwin 25.6 arm64
+ships no nullfs at all, so no Macker build can enforce a read-only hostPath
+mount there and maclet refuses such a Pod at admission instead of launching it
+into a mount failure. Where nullfs does exist, Macker enforces a node-wide
+read-only nullfs mount, and read-only means writes through that mount fail with
+`EROFS`; it is not containment, because a darwin-native workload runs without
+`chroot` and can open the same host path directly with its own host permissions.
+Enforced read-only on a node without nullfs comes from a `readOnly`
+PersistentVolumeClaim, which maclet mounts host-side with `mount_nfs -o ro`.
+A `readOnly` mount whose resolved host path is a single file is
 refused, because macOS cannot nullfs-mount one file read-only; mount the
-containing directory and address the file inside it. Against a Macker that
-cannot enforce `:ro` at all, a
+containing directory and address the file inside it. Against a Macker or a node
+that cannot enforce `:ro` at all, a
 `readOnly` hostPath mount and any `subPathExpr` mount are rejected rather than
 silently run writable; ConfigMap read-only mounts are accepted and stay trusted
-writable copies until `:ro` is available. Read-only volumes need root or
+writable copies until `:ro` is available. Read-only mounts need root or
 passwordless `sudo` on the node, as the PF and NFS paths do. See `KUBERNETES-PARITY.md` for the
 full list of what a maclet node guarantees and what it knowingly does differently. Multiple containers,
 unsupported volume sources, `valueFrom: resourceFieldRef`, and `hostPort`
