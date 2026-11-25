@@ -1,9 +1,11 @@
 package maclet
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -953,5 +955,35 @@ func TestReadOnlyCapabilityFollowsTheProbeLadder(t *testing.T) {
 				t.Errorf("refusal detail = %q, should not carry %q", detail, tc.wantAbsent)
 			}
 		})
+	}
+}
+
+// Macker's `guidance` paragraph is a checklist for whoever administers the node, and a
+// capability answer is re-probed every few minutes while it stays negative. maclet logs it
+// without the debug flag -- it is the only place an operator can read the runtime's reasoning
+// behind a refusal that has already been filed -- but once per distinct paragraph, so the node
+// log does not fill with the same 900 characters every retry.
+func TestMackerReadOnlyGuidanceIsLoggedOncePerParagraph(t *testing.T) {
+	var logged bytes.Buffer
+	previous := log.Writer()
+	log.SetOutput(&logged)
+	defer log.SetOutput(previous)
+
+	manager := &workloadManager{}
+	for _, guidance := range []string{
+		"check /Library/Filesystems/null.fs and /sbin/mount_nullfs",
+		"  check /Library/Filesystems/null.fs and /sbin/mount_nullfs  ",
+		"",
+		"run macker volumes --probe to ask the kernel directly",
+	} {
+		manager.logMackerReadOnlyGuidance(guidance)
+	}
+
+	output := logged.String()
+	if count := strings.Count(output, "read-only volume guidance for this node"); count != 2 {
+		t.Errorf("guidance logged %d times, want 2 (once per distinct paragraph): %s", count, output)
+	}
+	if !strings.Contains(output, "run macker volumes --probe") {
+		t.Errorf("guidance log = %q, want the changed paragraph too", output)
 	}
 }

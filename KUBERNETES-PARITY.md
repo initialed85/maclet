@@ -67,7 +67,9 @@ that capability in two stages:
   maclet falls back to the unproven verdict from `macker volumes --format json` (Macker
   ≥ `4527b97`), which is the runtime's own answer about the mount path it will take,
   including a vendored helper named by `MACKER_MOUNT_NULLFS`. Macker's `guidance` field
-  is a node-operator checklist and is logged on the node, not put in a Pod's status.
+  is a node-operator checklist: maclet writes it to the node log once per distinct
+  paragraph (a negative capability answer is re-probed every few minutes, and the
+  checklist is long), and never puts it in a Pod's status.
   Where neither subcommand exists (the answer comes back as usage text), maclet falls
   back to two checks of its own: whether `macker run --help` advertises the marker
   `HOST:CONTAINER[:ro]`, which is a contract/version check only, and whether this OS

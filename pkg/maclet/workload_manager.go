@@ -106,6 +106,9 @@ type workloadManager struct {
 	// own platform reading otherwise. It goes into the refusal an operator reads, so
 	// the cause is never something they have to re-derive from a log.
 	readOnlyVolumesReason string
+	// readOnlyGuidanceLogged holds the last Macker `guidance` paragraph maclet wrote to
+	// the node log, so the same checklist is not repeated on every capability re-probe.
+	readOnlyGuidanceLogged string
 	// readOnlyVolumesNodeRejected records that Macker advertised the read-only
 	// volume marker but a launch still failed on the mount itself. It is sticky
 	// until the Macker binary changes, so maclet refuses readOnly volumes at
@@ -199,9 +202,7 @@ func (m *workloadManager) readOnlyVolumesRefusalDetail() string {
 //     is why it sits last.
 func (m *workloadManager) readOnlyVolumeCapability() (bool, bool, string) {
 	if verdict, ok := parseMackerReadOnlyVerdict(m.mackerHelpOutput("volumes", "--probe", "--format", "json")); ok {
-		if m.debug && verdict.Guidance != "" {
-			log.Printf("debug: Macker read-only volume guidance for this node: %s", verdict.Guidance)
-		}
+		m.logMackerReadOnlyGuidance(verdict.Guidance)
 		switch verdict.ProbeStatus {
 		case mackerProbeEnforced:
 			reason := strings.TrimSpace(verdict.Reason)
@@ -256,6 +257,7 @@ func (m *workloadManager) readOnlyVolumeCapability() (bool, bool, string) {
 // decision. caveat, when set, is appended so an operator reading a Pending Pod knows
 // the answer was never tested against the kernel.
 func (m *workloadManager) readOnlyVerdictDecision(verdict mackerReadOnlyVerdict, caveat string) (bool, bool, string) {
+	m.logMackerReadOnlyGuidance(verdict.Guidance)
 	reason := strings.TrimSpace(verdict.Reason)
 	if verdict.ReadOnlySupported {
 		if reason == "" {
@@ -267,6 +269,22 @@ func (m *workloadManager) readOnlyVerdictDecision(verdict mackerReadOnlyVerdict,
 		reason = reason + " (" + caveat + ")"
 	}
 	return false, true, reason
+}
+
+// logMackerReadOnlyGuidance writes Macker's node-operator checklist to the node log,
+// once per distinct paragraph. It is deliberately not put in a Pod's status: guidance is
+// a checklist for whoever administers the node (what to look for, which command answers
+// the question, which override exists for a future OS), and a Pod cannot act on any of
+// it. It is logged without the debug flag because it is the only place a node operator
+// can read the runtime's reasoning for a refusal maclet has already filed, and it is
+// deduplicated because a negative capability answer is re-probed every few minutes.
+func (m *workloadManager) logMackerReadOnlyGuidance(guidance string) {
+	guidance = strings.TrimSpace(guidance)
+	if guidance == "" || guidance == m.readOnlyGuidanceLogged {
+		return
+	}
+	m.readOnlyGuidanceLogged = guidance
+	log.Printf("macker read-only volume guidance for this node: %s", guidance)
 }
 
 // readOnlyProbeRefusal words a probe answer that says no. Macker's own reason is the
