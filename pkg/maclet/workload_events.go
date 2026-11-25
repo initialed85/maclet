@@ -97,12 +97,17 @@ func podEventName(pod Pod, phase, reason, message string) string {
 	if podKey != "" {
 		name += "." + podKey
 	}
-	name += "." + hash
-	if len(name) > 63 {
-		name = name[:63]
+	// The hash is the only thing separating two states of one Pod, so it is kept and
+	// the readable part gives way. Truncating the other way -- which is what this used
+	// to do -- collapsed "Macker started the trusted native workload" and "Macker is
+	// running the trusted native workload" onto one object name on a long Pod name, and
+	// the second report silently merged over the first.
+	if len(name)+1+len(hash) > 63 {
+		name = name[:63-1-len(hash)]
 	}
-	// A Kubernetes object name must end alphanumeric, and truncation above is the one
-	// way it could fail to.
+	name += "." + hash
+	// A Kubernetes object name must end alphanumeric; the hash tail guarantees that,
+	// and the sanitizer trims whatever the truncation exposed.
 	return sanitizeNamePart(name)
 }
 

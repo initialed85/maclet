@@ -209,6 +209,27 @@ func TestPodEventNamesAreStableAcrossRestarts(t *testing.T) {
 	if podEventName(*otherPod, "Pending", "MacletUnsupportedPod", "same message") == first {
 		t.Fatal("two Pods collapsed onto one Event name")
 	}
+	// The case the friendly fixture missed, found on the node: a Deployment-managed Pod
+	// name plus the "maclet.<phase>.<reason>." prefix overflows 63 characters, and
+	// maclet's two startup reports for one workload -- "Macker started the trusted
+	// native workload" and "Macker is running the trusted native workload" -- landed on
+	// the same name, so the second merged over the first and one line disappeared.
+	long := eventTestPod()
+	long.ObjectMeta.Name = "woodpecker-agent-darwin-565996794d-httdd"
+	started := podEventName(*long, "Running", "MacletWorkloadRunning", "Macker started the trusted native workload")
+	running := podEventName(*long, "Running", "MacletWorkloadRunning", "Macker is running the trusted native workload")
+	if started == running {
+		t.Fatalf("two states of one long-named Pod collapsed onto %q", started)
+	}
+	for _, name := range []string{started, running} {
+		if len(name) > 63 || name != sanitizeNamePart(name) {
+			t.Errorf("name %q is not a usable Kubernetes object name", name)
+		}
+		// The tail is the hash, not a fragment of the readable part.
+		if last := strings.Split(name, ".")[len(strings.Split(name, "."))-1]; len(last) != 10 {
+			t.Errorf("name %q lost its distinguishing hash (tail %q)", name, last)
+		}
+	}
 	for _, name := range []string{first, other, podEventName(*otherPod, "Pending", "MacletMackerLaunchFailed", "x")} {
 		if len(name) > 63 || name != sanitizeNamePart(name) {
 			t.Errorf("name %q is not a usable Kubernetes object name", name)
