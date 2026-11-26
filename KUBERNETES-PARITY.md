@@ -279,6 +279,42 @@ ENOTSUP" and so trips both, while `866c98f` (build-38) and `7837864` (build-41) 
 Build-38 to build-41 is a one-line change inside `guidance` and no change at all to the `reason`
 maclet copies into a Pod's status, so the choice between them is only about what the node log tells
 an operator.
+
+**That roll has been done, and both halves of the expectation are now measurements rather than
+predictions.** Applied to icarus-2 at 2026-11-26T04:27:51Z as maclet **build-73 (`7fd7e86e`)** plus
+macker **build-41 (`78378640`)** by copy, re-sign, move, kickstart; installed binaries sha256
+`2e8ca75f0890…` and `4a7d904cf409…`, paired with their commits in `~/.macgrubernetes/provenance.log`,
+node `Ready` throughout and the workload process up at the first check. Pre-roll I captured the red
+half myself through the API: a native-labelled `:ro` Deployment on a real host directory was refused
+with build-33's `reason` containing *"this kernel does not register the null filesystem at all"* — the
+falsified sentence, in a Pod status, on a live node. Post-roll the same filing is refused with:
+
+> probe not attempted: this macOS ships no null filesystem bundle (looked for a bundle named
+> nullfs.fs or null.fs under /Library/Filesystems) and no mount_nullfs helper exists, and mount(2)
+> as root draws EPERM for the type nullfs because Apple gates that mount entry point behind a
+> private entitlement no third-party helper can hold.
+
+No falsified claim in it, and the stage exits **0** on the build-73 tree with the refusal lines
+printed — so it passed without skipping the `:ro` block, which is the only way that green means
+anything. Two details worth recording, because both are easy to read as something they are not:
+
+- **The `probe not attempted:` prefix survived the roll.** macker build-41 still short-circuits on
+  the absent bundle and helper rather than reaching `mount(2)`, and `macker volumes --probe` answers
+  `probe_status: not_attempted_os` with `read_only_supported: false`. So maclet's decision here comes
+  from the blockage shortcut (`readOnlyMackerBlocked` matching the bundle and helper clauses) plus the
+  mount-route OS check, exactly as it did on build-33; what changed is the inherited *text*, not the
+  path. A node that gets a bundle or helper is when the probe-status ladder starts deciding this.
+- **The errno rows above are now two-run measurements on the node, in every mount-data shape.**
+  Re-compiled probe run as root: `nullfs` → `EPERM` (1) with the data as a string, as `NULL`, and as
+  an `MS_NULLFS_SB`-shaped `{spec, fspec}` struct — the refusal is at the entry point and does not
+  depend on the spec being well-formed; `null`, `bindfs`, and a made-up name → `ENODEV` (19) in all
+  three shapes. Both runs agree with each other and with macker's earlier relayed numbers, so the
+  bindfs row that was a single reported value is now closed as fact: no `bindfs` name is registered
+  on macOS 26.6.2, which is a stronger closure than the entitlement gate nullfs sits behind.
+
+The node still refuses `:ro` and that is the correct steady state — build-41 adds no mount route,
+so nothing about enforcement changed. What the roll bought is that the reason a workload is refused
+is now true, on the Pod, on the node log, and in `macker volumes` output alike.
 On a node whose macOS does provide a usable read-only bind mount, the same stage
 exercises the enforcement path unchanged: the Pod runs, its writes fail, and it never
 becomes Ready.

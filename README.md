@@ -444,7 +444,11 @@ Apple's `bsd/miscfs/bindfs/bind_vfsops.c` does define `com.apple.private.bindfs-
 and an entitlement-gated `bindfs_mount()`, so reading that file tells you the
 opposite of what the shipping kernel exposes. No Macker build, at any uid, can
 enforce a read-only hostPath mount there. maclet refuses such a Pod at admission instead of launching it into a
-mount failure. Where nullfs does exist, Macker enforces a node-wide
+mount failure, and that refusal is what the node says out loud today: on icarus-2, running maclet
+build-73 and Macker build-41, a `readOnly` hostPath Pod is refused with "no null filesystem bundle
+… and mount(2) as root draws EPERM for the type nullfs because Apple gates that mount entry point
+behind a private entitlement no third-party helper can hold", which is true, and the stage that
+asserts it stays honest passes on that node. Where nullfs does exist, Macker enforces a node-wide
 read-only nullfs mount, and read-only means writes through that mount fail with
 `EROFS`; it is not containment, because a darwin-native workload runs without
 `chroot` and can open the same host path directly with its own host permissions.
